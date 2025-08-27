@@ -12,13 +12,17 @@ import time
 
 # ---- Configurations ----
 video = ""  # Replace with video path if needed
-camId = 0
+camId = 1
 markerLength = 0.1  # Marker side length in meters (adjust accordingly)
 estimatePose = True
 showRejected = True
 
 previous_time = time.time()
 previous_tvecs = {}
+
+velo_total = 0
+
+period = 15
 
 # Load camera parameters (replace with actual calibration)
 camMatrix = np.eye(3, dtype=np.float32)  # Dummy identity matrix
@@ -67,12 +71,16 @@ while inputVideo.isOpened():
 
     rvecs = []
     tvecs = []
+    velo_total = 0
 
     # Estimate pose for each detected marker
     if estimatePose and ids is not None:
         for i in range(len(ids)):
             retval, rvec, tvec = cv2.solvePnP(
                 objPoints, corners[i], camMatrix, distCoeffs)
+            rvecs.append(rvec)
+            tvecs.append(tvec)
+
             marker_id = ids[i][0]
             current_tvec = tvecs[i][0]
 
@@ -80,21 +88,24 @@ while inputVideo.isOpened():
                 prev_tvec = previous_tvecs[marker_id]
                 # Calculate velocity components (vx, vy, vz)
                 velocity = (current_tvec - prev_tvec) / delta_t
-                print(f"Marker ID {marker_id} Velocity: {velocity} m/s")
+                velo_total += velocity
+                print(f"Marker ID {marker_id} Velocity: {np.round(velocity,2)} m/s")
 
+            # velo_total[marker_id] += velocity
             previous_tvecs[marker_id] = current_tvec
 
-            rvecs.append(rvec)
-            tvecs.append(tvec)
             # previous_tvecs.append(tvec)
 
     currentTime = time.time() - startTime
     totalTime += currentTime
     totalIterations += 1
 
-    if totalIterations % 30 == 0:
-        print(f"Detection Time = {currentTime * 1000:.2f} ms "
-              f"(Mean = {1000 * totalTime / totalIterations:.2f} ms)")
+    # if totalIterations % period == 0:
+        # print(f"Detection Time = {currentTime * 1000:.2f} ms "
+        #       f"(Mean = {1000 * totalTime / totalIterations:.2f} ms)")
+        # for marker_id in velo_total:
+        # print(f"velocity = {velo_total/period} m/s")
+        
 
 
     previous_time = current_time
