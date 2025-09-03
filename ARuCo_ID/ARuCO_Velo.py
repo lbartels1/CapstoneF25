@@ -12,21 +12,36 @@ import time
 
 # ---- Configurations ----
 video = ""  # Replace with video path if needed
-camId = 1
+camId = 1 # 0 is laptop camera, 1 is webcam
 markerLength = 0.1  # Marker side length in meters (adjust accordingly)
 estimatePose = True
-showRejected = True
+showRejected = False
 
 previous_time = time.time()
 previous_tvecs = {}
 
 velo_total = 0
 
-period = 15
+period = 30
+window_size = 15
+velo_array = [0] * window_size
+
+font = cv2.FONT_HERSHEY_COMPLEX
+bottomLeftCornerOfText = (10,30)
+fontScale = 1
+fontColor = (255,255,255)
+thickness = 1 
+lineType = 2
+
+# file_name = "./../Camera/cam_calibration_mtx.txt"
+
+# mtx = np.loadtxt("cam_calibration_mtx.txt", dtype= 'd', delimiter=',')
+# dist = np.loadtxt("cam_calibration_dist.txt", dtype= 'd', delimiter=',')
 
 # Load camera parameters (replace with actual calibration)
 camMatrix = np.eye(3, dtype=np.float32)  # Dummy identity matrix
 distCoeffs = np.zeros((5, 1), dtype=np.float32)  # Dummy zero distortion
+
 
 # ---- Load ArUco Dictionary and Detector Parameters ----
 dictionary = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
@@ -71,6 +86,8 @@ while inputVideo.isOpened():
 
     rvecs = []
     tvecs = []
+
+    velocity = 0.00
     velo_total = 0
 
     # Estimate pose for each detected marker
@@ -88,7 +105,8 @@ while inputVideo.isOpened():
                 prev_tvec = previous_tvecs[marker_id]
                 # Calculate velocity components (vx, vy, vz)
                 velocity = (current_tvec - prev_tvec) / delta_t
-                velo_total += velocity
+                velo_array.append(velocity)
+                velo_array.pop(0)
                 print(f"Marker ID {marker_id} Velocity: {np.round(velocity,2)} m/s")
 
             # velo_total[marker_id] += velocity
@@ -100,23 +118,25 @@ while inputVideo.isOpened():
     totalTime += currentTime
     totalIterations += 1
 
-    # if totalIterations % period == 0:
-        # print(f"Detection Time = {currentTime * 1000:.2f} ms "
-        #       f"(Mean = {1000 * totalTime / totalIterations:.2f} ms)")
-        # for marker_id in velo_total:
-        # print(f"velocity = {velo_total/period} m/s")
+
+    if totalIterations % period == 0:
+        print(f"velocity = {np.round((velo_total/period), 2)} m/s")
+
+    for item in velo_array:
+        velo_total += item
+    velo_average = velo_total / len(velo_array)
         
-
-
     previous_time = current_time
+    imageCopy = image.copy()
 
     # Draw detections and pose
-    imageCopy = image.copy()
+    cv2.putText(imageCopy, str(np.round(np.abs(velo_average),2)), bottomLeftCornerOfText,font, fontScale, fontColor, thickness, lineType)
     if ids is not None:
         aruco.drawDetectedMarkers(imageCopy, corners, ids)
         if estimatePose:
             for rvec, tvec in zip(rvecs, tvecs):
                 cv2.drawFrameAxes(imageCopy, camMatrix, distCoeffs, rvec, tvec, markerLength * 1.5)
+                
 
     if showRejected and rejected is not None and len(rejected) > 0:
         aruco.drawDetectedMarkers(imageCopy, rejected, borderColor=(100, 0, 255))
