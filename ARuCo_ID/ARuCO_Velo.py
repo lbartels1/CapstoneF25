@@ -35,12 +35,14 @@ lineType = 2
 
 # file_name = "./../Camera/cam_calibration_mtx.txt"
 
-# mtx = np.loadtxt("cam_calibration_mtx.txt", dtype= 'd', delimiter=',')
-# dist = np.loadtxt("cam_calibration_dist.txt", dtype= 'd', delimiter=',')
+mtx = np.loadtxt(r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\camera_mtx.txt", delimiter=',')
+dist = np.loadtxt(r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\camera_dist.txt", delimiter=',')
+
+print(mtx, dist)
 
 # Load camera parameters (replace with actual calibration)
-camMatrix = np.eye(3, dtype=np.float32)  # Dummy identity matrix
-distCoeffs = np.zeros((5, 1), dtype=np.float32)  # Dummy zero distortion
+camMatrix = mtx  # Dummy identity matrix
+distCoeffs = dist  # Dummy zero distortion
 
 
 # ---- Load ArUco Dictionary and Detector Parameters ----
@@ -71,6 +73,7 @@ objPoints = objPoints.reshape((4, 1, 3))
 totalTime = 0
 totalIterations = 0
 
+tvecs = []
 while inputVideo.isOpened():
     ret, image = inputVideo.read()
     if not ret:
@@ -85,7 +88,6 @@ while inputVideo.isOpened():
     delta_t = current_time - previous_time
 
     rvecs = []
-    tvecs = []
 
     velocity = 0.00
     velo_total = 0
@@ -111,6 +113,8 @@ while inputVideo.isOpened():
 
             # velo_total[marker_id] += velocity
             previous_tvecs[marker_id] = current_tvec
+            print(tvec)
+            
 
             # previous_tvecs.append(tvec)
 
@@ -143,8 +147,10 @@ while inputVideo.isOpened():
 
     cv2.imshow("out", imageCopy)
     key = cv2.waitKey(waitTime)
+
     if key == 27:  # ESC key
         break
 
+np.save("recorded_tvecs", tvecs)
 inputVideo.release()
 cv2.destroyAllWindows()
