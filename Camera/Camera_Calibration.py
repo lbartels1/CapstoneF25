@@ -6,7 +6,7 @@ import glob
 
 
 # Define the dimensions of checkerboard
-CHECKERBOARD = (6, 9)
+CHECKERBOARD = (6, 8)
 
 
 # stop the iteration when specified
@@ -60,7 +60,7 @@ for filename in images:
         # Refining pixel coordinates
         # for given 2d points.
         corners2 = cv2.cornerSubPix(
-            grayColor, corners, (11, 11), (-1, -1), criteria)
+            grayColor, corners, (5, 5), (-1, -1), criteria)
 
         twodpoints.append(corners2)
 
@@ -84,6 +84,14 @@ h, w = image.shape[:2]
 ret, matrix, distortion, r_vecs, t_vecs = cv2.calibrateCamera(
     threedpoints, twodpoints, grayColor.shape[::-1], None, None)
 
+mean_error = 0
+for i in range(len(threedpoints)):
+    imgpoints2, _ = cv2.projectPoints(threedpoints[i], r_vecs[i], t_vecs[i], matrix, distortion)
+    error = cv2.norm(twodpoints[i], imgpoints2, cv2.NORM_L2) / len(imgpoints2)
+    mean_error += error
+
+print("\nTotal reprojection error: ", mean_error / len(threedpoints))
+
 
 # Displaying required output
 print(" Camera matrix:")
@@ -96,8 +104,8 @@ np.savetxt("camera_dist.txt", distortion, delimiter=",")
 
 print("\n Rotation Vectors:")
 print(r_vecs)
-# np.savetxt("camera_rot.txt", r_vecs, delimiter=",")
+np.save("camera_rvec", r_vecs[0])
 
 print("\n Translation Vectors:")
 print(t_vecs)
-# np.savetxt("camera_tran", t_vecs, delimiter=",")
+np.save("camera_tvec", t_vecs[0])
