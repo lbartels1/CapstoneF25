@@ -95,6 +95,23 @@ class KalmanFilter3D:
 
 kf = KalmanFilter3D()
 kf_initialized = False
+print("Kalman Initialized")
+
+def transform_pose_to_checkerboard_frame(rvec_marker, tvec_marker, rvec_checkerboard, tvec_checkerboard):
+    T_marker = pose_to_matrix(rvec_marker, tvec_marker)
+    T_checkerboard = pose_to_matrix(rvec_checkerboard, tvec_checkerboard)
+    T_camera_in_checkerboard = np.linalg.inv(T_checkerboard)
+    T_marker_in_checkerboard = T_camera_in_checkerboard @ T_marker
+    return matrix_to_pose(T_marker_in_checkerboard)
+
+def matrix_to_pose(T):
+    R = T[:3, :3]
+    tvec = T[:3, 3]
+    rvec, _ = cv2.Rodrigues(R)
+    return rvec, tvec
+
+T_checkerboard_in_camera = pose_to_matrix(cam_rvec, cam_tvec)
+T_camera_in_checkerboard = np.linalg.inv(T_checkerboard_in_camera)  # Floor frame
 
 # ==== MAIN LOOP ====
 while inputVideo.isOpened():
@@ -113,18 +130,20 @@ while inputVideo.isOpened():
     if estimatePose and ids is not None:
         for i in range(len(ids)):
             success, rvec, tvec = cv2.solvePnP(
-                objPoints, corners[i], camMatrix, distCoeffs
-            )
+                objPoints, corners[i], camMatrix, distCoeffs)
+            
             if not success:
                 continue
 
             rvecs_frame.append(rvec)
             tvecs_frame.append(tvec)
 
-            # Transform to world coordinate
-            robot_T_cam = pose_to_matrix(rvec, tvec)
-            robot_T_world = cam_T @ robot_T_cam
-            robot_pos_world = robot_T_world[:3, 3]
+            # Convert to homogeneous transform
+            T_marker_in_camera = pose_to_matrix(rvec, tvec)
+
+            # Transform marker pose from camera frame to checkerboard (floor) frame
+            T_marker_in_checkerboard = T_camera_in_checkerboard @ T_marker_in_camera
+            robot_pos_world = T_marker_in_checkerboard[:3, 3]  # 3D position in floor coords
 
             # Kalman filter
             if not kf_initialized:
@@ -135,6 +154,7 @@ while inputVideo.isOpened():
             filtered_pos = kf.get_position()
             translated_tvecs.append(filtered_pos)
 
+    # Store results
     all_rvecs.extend(rvecs_frame)
     all_tvecs.extend(tvecs_frame)
 

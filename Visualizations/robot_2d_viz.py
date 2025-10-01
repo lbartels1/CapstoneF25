@@ -24,39 +24,90 @@ ax.set_ylabel('Y')
 ax.grid(True)
 
 orientation_quivers = []
+# For the no-quiver (line) visualization
+orientation_lines = []
 
 arrow_length = 1  # Adjust as needed
 
 def init():
     point.set_data([], [])
-    # Removed traj_line.set_data([], [])
     return (point,)
 
-def animate(i):
+
+def animate_quivers(i):
+    """Quiver-based animation using fixed-length arrows rotating only about Z."""
     global orientation_quivers
+    # Remove previous quivers
     for q in orientation_quivers:
-        q.remove()
+        try:
+            q.remove()
+        except Exception:
+            pass
     orientation_quivers = []
 
     x, y, z = tvecs[i]
     point.set_data([x], [y])
-    # Removed traj_line.set_data(xs[:i+1], ys[:i+1])
 
     rvec = rvecs[i]
     R, _ = cv2.Rodrigues(rvec)
 
-    # Local X and Y axes in object space
-    local_axes = np.eye(3) * arrow_length
-    rotated_axes = R @ local_axes.T
+    # Compute yaw (heading) from rotation matrix
+    yaw = np.arctan2(R[1, 0], R[0, 0])
 
-    # Only plot X and Y axes as quivers in 2D
-    colors = ['r', 'g']
-    for j in range(2):
-        dir = rotated_axes[:, j]
-        q = ax.quiver(x, y, dir[0], dir[1], color=colors[j], angles='xy', scale_units='xy', scale=1, width=0.01)
-        orientation_quivers.append(q)
+    # Forward (red) vector in XY plane
+    fx = arrow_length * np.cos(yaw)
+    fy = arrow_length * np.sin(yaw)
+
+    # Left (green) vector in XY plane (90 deg rotated)
+    lx = arrow_length * np.cos(yaw + np.pi/2)
+    ly = arrow_length * np.sin(yaw + np.pi/2)
+
+    # Plot the two fixed-length quivers
+    qf = ax.quiver(x, y, fx, fy, color='r', angles='xy', scale_units='xy', scale=1, width=0.01)
+    ql = ax.quiver(x, y, lx, ly, color='g', angles='xy', scale_units='xy', scale=1, width=0.01)
+    orientation_quivers.extend([qf, ql])
 
     return (point, *orientation_quivers)
 
-ani = FuncAnimation(fig, animate, init_func=init, frames=len(tvecs), interval=30, blit=False)
+
+def animate_no_quivers(i):
+    """Line-based animation: fixed-length colored segments rotating about Z only."""
+    global orientation_lines
+    # Remove previous lines
+    for ln in orientation_lines:
+        try:
+            ln.remove()
+        except Exception:
+            pass
+    orientation_lines = []
+
+    x, y, z = tvecs[i]
+    point.set_data([x], [y])
+
+    rvec = rvecs[i]
+    R, _ = cv2.Rodrigues(rvec)
+    yaw = np.arctan2(R[1, 0], R[0, 0])
+
+    fx = arrow_length * np.cos(yaw)
+    fy = arrow_length * np.sin(yaw)
+
+    lx = arrow_length * np.cos(yaw + np.pi/2)
+    ly = arrow_length * np.sin(yaw + np.pi/2)
+
+    # Forward line (red)
+    lf, = ax.plot([x, x + fx], [y, y + fy], color='r', linewidth=2)
+    orientation_lines.append(lf)
+
+    # Left line (green)
+    ll, = ax.plot([x, x + lx], [y, y + ly], color='g', linewidth=2)
+    orientation_lines.append(ll)
+
+    return (point, *orientation_lines)
+
+
+# Choose animation style: set to False to use the no-quiver (line) version
+use_quivers = False
+animate_func = animate_quivers if use_quivers else animate_no_quivers
+
+ani = FuncAnimation(fig, animate_func, init_func=init, frames=len(tvecs), interval=30, blit=False)
 plt.show()
