@@ -1,0 +1,9 @@
+# Scale and canvas metadata
+pixels_per_meter: 1176.0816573328148
+width_px: 1810
+height_px: 2000
+min_x_m: -5.428557968139648
+max_x_m: -3.890274906158447
+min_y_m: 5.6828912734985355
+max_y_m: 7.383453464508056
+pad_m: 0.1
