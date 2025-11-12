@@ -96,16 +96,16 @@ print("\nTotal reprojection error: ", mean_error / len(threedpoints))
 # Displaying required output
 print(" Camera matrix:")
 print(matrix)
-np.savetxt("camera_mtx.txt", matrix, delimiter=",")
+# np.savetxt("camera_mtx.txt", matrix, delimiter=",")
 
 print("\n Distortion coefficient:")
 print(distortion)
-np.savetxt("camera_dist.txt", distortion, delimiter=",")
+# np.savetxt("camera_dist.txt", distortion, delimiter=",")
 
 print("\n Rotation Vectors:")
 print(r_vecs)
-np.save("camera_rvec", r_vecs[0])
+# np.save("camera_rvec", r_vecs[0])
 
 print("\n Translation Vectors:")
 print(t_vecs)
-np.save("camera_tvec", t_vecs[0])
+# np.save("camera_tvec", t_vecs[0])

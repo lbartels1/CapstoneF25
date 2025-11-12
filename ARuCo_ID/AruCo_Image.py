@@ -3,7 +3,7 @@ import cv2.aruco as aruco
 import numpy as np
 
 # ---- Configuration ----
-imagePath = "test_image2.jpg"  # 🔁 Replace with your actual image path
+imagePath = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\ARuCo_ID\test_image2.jpg"  # 🔁 Replace with your actual image path
 markerLength = 0.1  # in meters
 estimatePose = True
 showRejected = True

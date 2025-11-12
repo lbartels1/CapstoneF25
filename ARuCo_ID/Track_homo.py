@@ -59,7 +59,9 @@ objPoints = np.array([
 ], dtype=np.float32).reshape((4, 1, 3))
 
 # ---- realtime capture ----
-cap = cv2.VideoCapture(cam_index)
+cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 if not cap.isOpened():
     raise RuntimeError(f"Failed to open camera {cam_index}")
 

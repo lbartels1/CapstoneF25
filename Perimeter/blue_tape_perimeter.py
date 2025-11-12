@@ -8,18 +8,19 @@ camera_matrix = np.loadtxt(r'C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25
 dist_coeffs = np.loadtxt(r'C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Calibration_Data\camera_dist.txt', delimiter=',')
 
 # Define blue color range in HSV
-LOWER_BLUE = np.array([88, 45, 69])
-UPPER_BLUE = np.array([138, 232, 255])
+LOWER_BLUE = np.array([80, 45, 65])
+UPPER_BLUE = np.array([119, 188, 255])
 
-height = 1080
-width = 1920
+height = 720
+width = 1280
 
 # ArUco dictionary and marker size (in meters)
 ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 MARKER_LENGTH = 0.05  # 5 cm
 
 def detect_blue_tape(frame):
-    blur = cv2.blur(frame, (6,6))
+    # brighten = cv2.convertScaleAbs(frame, alpha=1.2, beta=30)
+    blur = cv2.blur(frame, (5,5))
     hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, LOWER_BLUE, UPPER_BLUE)
     kernel = np.ones((5, 5), np.uint8)
@@ -71,11 +72,7 @@ def contour_to_world_segments(cnt, H, min_area=500, approx_eps=0.01):
 def save_segments_to_pgm(segments, filename, max_size_px=2000, line_thickness_px=2, pad_m=0.1, scale_filename=None):
     """
     Save world-space line segments to a grayscale PGM image and write scale/meta to a text file.
-    segments: list of ((x1,y1),(x2,y2), length) in meters (world coords)
-    filename: output .pgm path
-    scale_filename: optional path for the scale/text file (if None -> filename_scale.txt)
-    max_size_px: max dimension in pixels for the canvas
-    pad_m: padding around the extents in meters
+    Now draws white background with black lines (inverted from original).
     """
     if not segments:
         raise ValueError("No segments to save.")
@@ -96,8 +93,8 @@ def save_segments_to_pgm(segments, filename, max_size_px=2000, line_thickness_px
     W = max(1, int(np.ceil(width_m * scale)))
     H = max(1, int(np.ceil(height_m * scale)))
 
-    # create grayscale canvas (0=black, 255=white). Draw lines as white on black.
-    canvas = np.zeros((H, W), dtype=np.uint8)
+    # create grayscale canvas (255=white background now)
+    canvas = np.full((H, W), 255, dtype=np.uint8)  # Changed from zeros to full(255)
 
     # helper to map world -> pixel (origin at top-left)
     def world_to_px(xw, yw):
@@ -108,7 +105,7 @@ def save_segments_to_pgm(segments, filename, max_size_px=2000, line_thickness_px
     for a, b, _ in segments:
         x1, y1 = world_to_px(a[0], a[1])
         x2, y2 = world_to_px(b[0], b[1])
-        cv2.line(canvas, (x1, y1), (x2, y2), color=255, thickness=line_thickness_px, lineType=cv2.LINE_AA)
+        cv2.line(canvas, (x1, y1), (x2, y2), color=0, thickness=line_thickness_px, lineType=cv2.LINE_AA)  # Changed color to 0 (black)
 
     # ensure output directory exists
     out_dir = os.path.dirname(filename)
@@ -140,19 +137,21 @@ def save_segments_to_pgm(segments, filename, max_size_px=2000, line_thickness_px
 
     return filename
 
-def main_single_image(image_source=1, preview=True, save_plot=False, plot_filename="tape_world.png", save_pgm=True, pgm_filename="map.pgm"):
+def main_single_image(image_source=r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter\taped_floor.jpg", preview=True, save_plot=False, plot_filename="tape_world.png", save_pgm=True, pgm_filename="map.pgm"):
     """
     Capture a single image (or load from file) and run the blue-tape -> world-segments pipeline once.
     image_source: int camera index (default 0) or path to image file.
     preview: show OpenCV preview windows (mask + overlay)
     save_plot: save the matplotlib world plot to plot_filename
     """
+
+    print("Getting image from camera ", image_source)
     # Acquire single frame
     if isinstance(image_source, int):
-        cap = cv2.VideoCapture(image_source)
-        ret, frame = cap.read()
+        cap = cv2.VideoCapture(image_source, cv2.CAP_MSMF)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        ret, frame = cap.read()
         cap.release()
         if not ret:
             print("Failed to capture image from camera.")
@@ -162,7 +161,9 @@ def main_single_image(image_source=1, preview=True, save_plot=False, plot_filena
         if frame is None:
             print(f"Failed to read image from {image_source}")
             return
-
+    
+    print("Image acquired, processing...")
+    # frame = cv2.imread(r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter\taped_floor.jpg")
     # Load calibration / homography points (same paths used previously)
     image_points = np.load(r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Calibration_Data\image_points.npy")
     world_points = np.load(r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Calibration_Data\world_points.npy")
@@ -181,6 +182,7 @@ def main_single_image(image_source=1, preview=True, save_plot=False, plot_filena
     vis = frame_und.copy()
     Hw = np.linalg.inv(H)
 
+    print("Processing contours...")
     for cnt in contours:
         if cv2.contourArea(cnt) < 500:
             continue
@@ -253,4 +255,5 @@ def main_single_image(image_source=1, preview=True, save_plot=False, plot_filena
 if __name__ == "__main__":
     # set image_source to 0 to grab from camera, or to a filepath string to load an image.
     # enable save_pgm to write the detected lines to a .pgm file
+    print("Running blue tape detection on camera 1")
     main_single_image(image_source=1, preview=True, save_plot=False, save_pgm=True, pgm_filename=r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter\map.pgm")

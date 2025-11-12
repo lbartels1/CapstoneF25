@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 from heapq import heappush, heappop
 import math
+import os
 
 class Node:
     def __init__(self, position, g_cost=float('inf'), h_cost=0):
@@ -53,7 +54,7 @@ class AStar:
     def is_valid(self, x, y):
         """Check if position is within bounds and not an obstacle"""
         if 0 <= x < self.width and 0 <= y < self.height:
-            return self.map[y, x] > 127  # Consider anything darker than mid-gray as obstacle
+            return self.map[y, x] > 255   # Consider anything darker than mid-gray as obstacle
         return False
     
     def heuristic(self, pos1, pos2):
@@ -161,7 +162,27 @@ def visualize_path(map_path, path, output_path=None):
     
     return display_img
 
-def create_gradient_around_obstacles(map_input, radius_px=50, gradient_path=None):
+def pixels_per_meter_from_scale(scale_path=r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter\map_scale.txt"):
+    """Read pixels_per_meter from scale file (expects 'pixels_per_meter: <value>')."""
+    if not os.path.exists(scale_path):
+        raise FileNotFoundError(f"Scale file not found: {scale_path}")
+    with open(scale_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('pixels_per_meter'):
+                try:
+                    return float(line.split(':', 1)[1].strip())
+                except ValueError:
+                    break
+    raise ValueError(f"pixels_per_meter not found or invalid in {scale_path}")
+
+def meters_to_pixels(radius_m):
+    """Convert radius in meters to integer pixels using the scale file."""
+    ppm = pixels_per_meter_from_scale()
+    return int(round(radius_m * ppm))
+
+
+def create_gradient_around_obstacles(map_input, radius=2.5, gradient_path=None):
     """
     Create a visual gradient PGM around obstacles while preserving a nav-safe binary PGM.
     - map_input: filepath to PGM or a numpy grayscale image
@@ -174,6 +195,8 @@ def create_gradient_around_obstacles(map_input, radius_px=50, gradient_path=None
     import os
     import numpy as np
     import cv2
+
+    radius_px = meters_to_pixels(radius)
 
     # load image if a path was provided
     if isinstance(map_input, str):
@@ -244,13 +267,13 @@ def main():
     scale_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter\map_scale.txt"
     output_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Navigation\path_result.png"
     # Create A* pathfinder
-    gradient_map = create_gradient_around_obstacles(map_path, radius_px=50)  # Optional: create gradient visualization
+    gradient_map = create_gradient_around_obstacles(map_path, radius = 2.5)  # Optional: create gradient visualization
     astar = AStar(gradient_map, scale_path)
     
     print("Starting A* pathfinding...")
     # Example coordinates (replace with actual start/goal)
-    start = (170, 1700)  # (x, y) in pixels
-    goal = (190, 1500)   # (x, y) in pixels
+    start = (150, 800)  # (x, y) in pixels
+    goal = (1200, 100)
     
     # Find path
     path = astar.find_path(start, goal)

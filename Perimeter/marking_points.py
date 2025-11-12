@@ -34,8 +34,14 @@ def main(image_source=1):
     global img, num_points
 
     # Load an image (e.g. from camera snapshot)
+    height = 720
+    width = 1280
+    
     if isinstance(image_source, int):
-        cap = cv2.VideoCapture(image_source)
+        cap = cv2.VideoCapture(image_source, cv2.CAP_MSMF)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+
         ret, frame = cap.read()
         cap.release()
         if not ret:

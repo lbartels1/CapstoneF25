@@ -4,8 +4,6 @@ import os
 import math
 import time
 from heapq import heappush, heappop
-# import socket
-# import json
 import threading
 
 camera_mtx_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Calibration_Data\camera_mtx.txt"
@@ -17,6 +15,9 @@ cam_tvec_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Calibratio
 
 map_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter\map.pgm"
 map_scale_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter\map_scale.txt"
+
+height = 720
+width = 1280
 # ---- helpers ----
 def pose_to_matrix(rvec, tvec):
     R, _ = cv2.Rodrigues(rvec)
@@ -40,129 +41,155 @@ def parse_scale(scale_path=r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25
                     break
     raise ValueError(f"pixels_per_meter not found or invalid in {scale_path}")
 
-def visualize_path(map_path, path, output_path=None):
-    """Visualize the path on the map"""
-    map_img = cv2.imread(map_path, cv2.IMREAD_GRAYSCALE)
-    map_rgb = cv2.cvtColor(map_img, cv2.COLOR_GRAY2RGB)
-    
-    # Draw path
-    if path:
-        for i in range(len(path) - 1):
-            pt1 = path[i]
-            pt2 = path[i + 1]
-            cv2.line(map_rgb, pt1, pt2, (0, 0, 255), 2)  # Red line
-        
-        # Mark start and goal
-        cv2.circle(map_rgb, path[0], 5, (0, 255, 0), -1)     # Green start
-        cv2.circle(map_rgb, path[-1], 5, (255, 0, 0), -1)    # Blue goal
-    
-    if output_path:
-        cv2.imwrite(output_path, map_rgb)
-    
-    # Resize for display
-    display_width = 400  
-    scale = display_width / map_rgb.shape[1]
-    display_height = int(map_rgb.shape[0] * scale)
-    display_size = (display_width, display_height)
-    display_img = cv2.resize(map_rgb, display_size, interpolation=cv2.INTER_AREA)
-    
-    return display_img
+import cv2
+import numpy as np
 
+def visualize_path(map_obj, path, use_gradient=False, color=(0, 0, 255), thickness=2, robot_position = (0,0)):
+    """
+    Visualize a path over the map or gradient map.
+
+    Args:
+        map_obj (Map): instance of Map containing .map and optionally .gradient_map
+        path (list[tuple[int, int]]): list of (x, y) pixel coordinates
+        use_gradient (bool): if True, visualize over the gradient map instead of raw map
+        color (tuple[int, int, int]): BGR color for the path
+        thickness (int): path line thickness
+
+    Returns:
+        np.ndarray: BGR image with path drawn
+    # """
+    if not hasattr(map_obj, "map"):
+        raise TypeError("Expected a Map object with .map attribute")
+
+    # Choose base image
+    if use_gradient and getattr(map_obj, "gradient_map", None) is not None:
+        base = map_obj.gradient_map.copy()
+    else:
+        base = map_obj.map.copy()
+
+    # Convert grayscale to BGR for drawing colored lines
+    if len(base.shape) == 2:
+        base_bgr = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+    else:
+        base_bgr = base.copy()
+
+    # Draw path
+    for i in range(1, len(path)):
+        cv2.line(base_bgr, path[i - 1], path[i], color, thickness)
+    
+    # Draw robot position
+    cv2.circle(base_bgr, path[0], radius=5, color=(255, 0, 0), thickness=-1)  # Start
+    cv2.circle(base_bgr, path[-1], radius=5, color=(0, 0, 255), thickness=-1) # End
+
+    cv2.circle(base_bgr, robot_position, radius=5, color=(255, 155, 0), thickness=-1)  # Start
+
+    return base_bgr
+
+""" Class for all things map"""
 class Map:
     def __init__(self, map_path, map_scale_path):
         self.map = cv2.imread(map_path, cv2.IMREAD_GRAYSCALE)
         if self.map is None:
             raise FileNotFoundError(f"Map image not found: {map_path}")
         
-        self.scale = parse_scale(map_scale_path, "pixels_per_meter")  # pixels per meter
-        self.map_height = parse_scale(map_scale_path, "height_px")  # in meters
-        self.map_width = parse_scale(map_scale_path, "width_px")    # in meters
+        self.params = {}
+        with open(map_scale_path, "r") as f:
+            for line in f:
+                if ":" in line and not line.strip().startswith("#"):
+                    key, val = line.strip().split(":")
+                    self.params[key.strip()] = float(val.strip())
 
-    
+        self.gradient_map = None  # to be created later
+        self.scale = self.params["pixels_per_meter"]
+        self.map_width = self.map.shape[1]
+        self.map_height = self.map.shape[0]
+
+        print(f"[Map] Loaded scale: {self.scale} px/m, width: {self.map_width}px, height: {self.map_height}px")
+
     def pixel_to_world(self, pixel_coords):
-        """ Convert pixel coordinates to world coordinates (meters) """
+        """Convert pixel coordinates to world coordinates (meters)."""
         return pixel_coords * self.scale
-    
-    def world_to_pixel(self, world_coords):
-        """ Convert world coordinates (meters) to pixel coordinates """
-        return (world_coords / self.scale).astype(float)
-    
-    def create_gradient_around_obstacles(self,map_input, radius=2.5, gradient_path="gradient.pgm"):
-        import os
-        import numpy as np
-        import cv2
 
-        radius_px = self.pixel_to_world(radius)
+    def world_to_pgm(self, xw, yw):
+        """
+        Convert a world coordinate (xw, yw) in meters to pixel coordinates (px, py)
+        in the saved PGM map using the metadata from the _scale.txt file.
 
-        # load image if a path was provided
-        if isinstance(map_input, str):
+        Args:
+            xw, yw : float
+                World coordinates in meters.
+            scale_file : str
+                Path to the *_scale.txt file created alongside the PGM.
+
+        Returns:
+            (px, py) : tuple of ints
+                Pixel coordinates in the PGM image (origin at top-left, y downward).
+        """
+
+        # Extract required values
+        scale = self.params["pixels_per_meter"]
+        min_x = self.params["min_x_m"]
+        max_y = self.params["max_y_m"]  # note: used for y inversion
+
+        # Compute pixel coordinates
+        px = int(round((xw - min_x) * scale))
+        py = int(round((max_y - yw) * scale))
+
+        return px, py
+
+
+    def create_gradient_around_obstacles(self, map_input=None, radius=2.5, gradient_path=None):
+        """
+        Create a gradient map around obstacles and store it in self.gradient_map.
+        
+        Args:
+            map_input (str | np.ndarray | None): map to use; defaults to self.map
+            radius (float): distance (in meters) to compute gradient
+            gradient_path (str | None): optional path to save gradient image
+        Returns:
+            np.ndarray: the gradient map as uint8 image (0–255)
+        """
+        import numpy as np, cv2, os
+
+        if map_input is None:
+            img = self.map.copy()
+        elif isinstance(map_input, str):
             img = cv2.imread(map_input, cv2.IMREAD_GRAYSCALE)
             if img is None:
                 raise ValueError(f"Could not load map from {map_input}")
-            base_dir = os.path.dirname(map_input)
-            base_name = os.path.splitext(os.path.basename(map_input))[0]
         elif isinstance(map_input, np.ndarray):
-            if map_input.ndim == 3:
-                img = cv2.cvtColor(map_input, cv2.COLOR_BGR2GRAY)
-            else:
-                img = map_input.copy()
-            base_dir = os.getcwd()
-            base_name = "map"
+            img = map_input.copy()
         else:
-            raise ValueError("map_input must be a filepath or numpy ndarray")
+            raise ValueError("map_input must be None, filepath, or numpy array")
 
-        # ensure dtype
-        img = img.astype(np.uint8)
+        # Convert radius (m) to pixels
+        radius_px = max(1, int(radius * self.scale))
 
-        # foreground for distance transform: free=255, obstacle=0
+        
+        # Distance transform (white = free, black = obstacle)
         fg = (img > 127).astype(np.uint8) * 255
+        dist = cv2.distanceTransform(fg, cv2.DIST_L2, 5)
 
-        # compute distance transform (float32)
-        dist = cv2.distanceTransform(fg, distanceType=cv2.DIST_L2, maskSize=5)
+        # Normalize and invert so near obstacles = dark, far = bright
+        clipped = np.minimum(dist, radius_px)
+        grad = (clipped / radius_px * 255.0).astype(np.uint8)
+        grad[fg == 0] = 0  # ensure obstacles remain black
 
-        # clamp to radius and map to 0..255
-        radius = float(max(1, radius_px))
-        clipped = np.minimum(dist, radius)
-        grad = (clipped / radius * 255.0).astype(np.uint8)
+        # Save to file if requested
+        if gradient_path:
+            if not cv2.imwrite(gradient_path, grad):
+                raise IOError(f"Failed to save gradient file: {gradient_path}")
+            print(f"Saved gradient visualization: {gradient_path}")
 
-        # Obstacles remain 0; pixels farther than radius -> 255
-        grad[fg == 0] = 0
-        grad[dist >= radius] = 255
-
-        # prepare nav-safe binary image (keep original navigation semantics)
-        # nav = np.where(img > 127, 255, 0).astype(np.uint8)
-
-        # default output paths
-        if gradient_path is None:
-            gradient_path = os.path.join(base_dir, f"{base_name}_gradient.pgm")
-        # if nav_path is None:
-        #     nav_path = os.path.join(base_dir, f"{base_name}_nav.pgm")
-
-        # ensure directories exist
-        gdir = os.path.dirname(gradient_path)
-        # ndir = os.path.dirname(nav_path)
-        if gdir and not os.path.exists(gdir):
-            os.makedirs(gdir, exist_ok=True)
-        # if ndir and not os.path.exists(ndir):
-        #     os.makedirs(ndir, exist_ok=True)
-
-        # save files
-        if not cv2.imwrite(gradient_path, grad):
-            raise IOError(f"Failed to write gradient file {gradient_path}")
-        # if not cv2.imwrite(nav_path, nav):
-        #     raise IOError(f"Failed to write nav-safe file {nav_path}")
-
-        # return nav-safe path for navigation; gradient saved for visualization
-        print(f"Saved gradient visualization: {gradient_path}")
-        # print(f"Saved nav-safe PGM for navigation: {nav_path}")
-        return gradient_path
-
-
+        # Store in class instance
+        self.gradient_map = grad
+        return grad
 
 """ Class to update and store robot pose estimation"""
 class Robot:
     def __init__(self, cam):
-        self.position = np.array([0.0, 0.0])  # x, y in meters OF WORLD FRAME
+        self.position_world = (0,0)  # x, y in meters OF WORLD FRAME
+        self.position_frame = (0,0)  # x, y in meters OF ROBOT FRAME
         self.heading = 0.0  # theta in radians
         self.ip_address = "192.168.0.101" # IP of the robot
         self.size = (0.75, 1) # in meters
@@ -202,9 +229,11 @@ class Robot:
 
     
     def get_pose_continuous(self):
-        """TODO: Import code from Track_homo that returns the robot's position and orientation 
+        """TODO: Import code from Track_homo that returns the robot's position_world and orientation 
             Consider making this its own thread and making the pose atomic. other option is not making it atomic and assuming it wont matter"""
-        cap = cv2.VideoCapture(self.cam_index)
+        cap = cv2.VideoCapture(self.cam_index, cv2.CAP_DSHOW)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         # print("here")
         if not cap.isOpened():
             raise RuntimeError(f"Failed to open camera {self.cam_index}")
@@ -212,13 +241,12 @@ class Robot:
             ret, frame = cap.read()
             if not ret:
                 break
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            # frame_idx += 1
 
-            # # undistort frame
+            # undistort frame
             frame_und = cv2.undistort(frame, self.camera_matrix, self.dist_coeffs)
 
-            # # detect markers
+            # detect markers
             corners, ids, rejected = self.detector.detectMarkers(frame_und)
 
             world_markers = []
@@ -259,11 +287,13 @@ class Robot:
                                 marker_info["tvec_world"] = t_world.flatten()
                                 marker_info["rvec_world"] = rvec_world.flatten()
                                 marker_info["yaw_world_from_pose"] = yaw_world
+
+                                x, y = marker_info["center_world"]
+                                self.position_world = (x, y)
                     except Exception:
                         pass
 
-                    self.position = marker_info["tvec_world"]
-                    self.heading = marker_info["yaw_world_from_pose"]
+                    world_markers.append(marker_info)
 
             # ---- OpenCV overlay ----
             vis = frame_und.copy()
@@ -278,25 +308,27 @@ class Robot:
                 cv2.arrowedLine(vis, (int(img_center[0]), int(img_center[1])), (int(tip_img[0]), int(tip_img[1])), (0,0,255), 2, tipLength=0.2)
 
             # show frame
-            cv2.imshow("ArUco realtime (undistorted)", vis)
+            # cv2.imshow("ArUco realtime (undistorted)", vis)
+            key = cv2.waitKey(1)
+            if key == 27 or key == ord('q'):
+                break
 
 
         return None
     
-    def path_to_velocities(self, point):
-        l_vel = 0
-        a_vel = 0
+    def followpath(self, path):
+        # TODO: get robot position, compute angular velocity and linear velocity to follow path
+        # Set linear and angular velocities
         return l_vel, a_vel
 
     def l_vel_pid(self):
+
         return None
     
     def a_vel_pid(self):
         return None
         
-
-
-""" Uses map and AStar to navigate the robot """
+""" Uses map and AStar to create a path for the robot """
 class Node:
     def __init__(self, position, g_cost=float('inf'), h_cost=0):
         self.position = position  # (x, y) tuple
@@ -311,147 +343,149 @@ class Node:
         return self.f_cost() < other.f_cost()
 
 class AStar:
-    def __init__(self, map_path, scale_path=None, cost_weight=2.0):
-        # Load PGM map
-        self.map = cv2.imread(map_path, cv2.IMREAD_GRAYSCALE)
-        if self.map is None:
-            raise ValueError(f"Could not load map from {map_path}")
-        
-        # In PGM: 0 = obstacle (black), 255 = free space (white)
+    def __init__(self, map_obj, cost_weight=2.0):
+        """
+        A* pathfinding using an existing Map instance.
+
+        Args:
+            map_obj (Map): an instance of your Map class
+            cost_weight (float): how strongly obstacle proximity affects cost
+        """
+        if not hasattr(map_obj, "map"):
+            raise TypeError("AStar requires a valid Map instance with .map attribute")
+
+        # Use map data directly
+        self.map = map_obj.gradient_map if map_obj.gradient_map is not None else map_obj.map
+        self.scale = map_obj.scale
         self.height, self.width = self.map.shape
-        
-        # Load scale information if provided
-        self.scale = 1.0  # pixels per meter
-        if scale_path:
-            self.load_scale(scale_path)
-            
-        # Define possible movements (8-directional)
+
+        # Movement model (8-connected grid)
         self.directions = [
-            (-1,-1), (0,-1), (1,-1),
-            (-1, 0),         (1, 0),
-            (-1, 1), (0, 1), (1, 1)
+            (-1, -1), (0, -1), (1, -1),
+            (-1,  0),          (1,  0),
+            (-1,  1), (0,  1), (1,  1)
         ]
 
-        # cost scaling parameter:
-        # cost_weight = 0 => no extra cost; larger -> more penalty near low-valued pixels
         self.cost_weight = float(cost_weight)
-        
-    def load_scale(self, scale_path):
-        """Load scale information from metadata file"""
-        with open(scale_path, 'r') as f:
-            for line in f:
-                if line.startswith('pixels_per_meter'):
-                    self.scale = float(line.split(':')[1].strip())
-                    break
-    
+
     def is_valid(self, x, y):
         """Check if position is within bounds and not an obstacle"""
         if 0 <= x < self.width and 0 <= y < self.height:
-            return self.map[y, x] > 127  # Consider anything darker than mid-gray as obstacle
+            return self.map[y, x] > 0  # Consider anything darker than mid-gray as obstacle
         return False
-    
+
+
     def heuristic(self, pos1, pos2):
-        """Calculate octile distance heuristic"""
+        """Octile distance heuristic for 8-directional movement"""
         dx = abs(pos1[0] - pos2[0])
         dy = abs(pos1[1] - pos2[1])
-        return (max(dx, dy) * 1.0 + (math.sqrt(2) - 1.0) * min(dx, dy))
-    
-    def get_path(self, current):
-        """Reconstruct path from goal to start"""
+        return max(dx, dy) + (math.sqrt(2) - 1) * min(dx, dy)
+
+    def get_path(self, node):
+        """Reconstruct the final path from a goal node"""
         path = []
-        while current:
-            path.append(current.position)
-            current = current.parent
-        return path[::-1]  # Reverse to get start-to-goal order
-    
+        while node:
+            path.append(node.position)
+            node = node.parent
+        return path[::-1]
+
     def find_path(self, start, goal):
-        """Find path from start to goal using A* algorithm; movement cost is scaled by pixel value."""
+        """Run A* from start→goal in pixel space"""
+        print(f"A* searching from {start} to {goal}...")
         if not (self.is_valid(*start) and self.is_valid(*goal)):
+            print("Invalid start or goal point.")
             return None
-        
+
         start_node = Node(start, g_cost=0)
         start_node.h_cost = self.heuristic(start, goal)
-        
-        open_set = []
-        heappush(open_set, start_node)
+        open_set = [start_node]
         closed_set = set()
-        
-        # track best g for positions
         best_g = {start: 0.0}
-        
+
         while open_set:
             current = heappop(open_set)
-            
             if current.position == goal:
                 return self.get_path(current)
-            
+
             if current.position in closed_set:
                 continue
             closed_set.add(current.position)
-            
+
             for dx, dy in self.directions:
-                next_x = current.position[0] + dx
-                next_y = current.position[1] + dy
-                next_pos = (next_x, next_y)
-                
-                if not self.is_valid(next_x, next_y) or next_pos in closed_set:
+                nx, ny = current.position[0] + dx, current.position[1] + dy
+                if not self.is_valid(nx, ny) or (nx, ny) in closed_set:
                     continue
-                
-                # base movement cost: diagonal = sqrt(2), straight = 1
-                base_cost = math.sqrt(2) if dx*dy != 0 else 1.0
 
-                # pixel value at the neighbor (0..255)
-                pv = int(self.map[next_y, next_x])
-
-                # Per your request: pixel value influences movement cost.
-                # - If pixel == 0 keep the usual movement cost (no extra penalty).
-                # - Otherwise scale cost by multiplier in (1 .. 1+cost_weight], stronger penalty closer to obstacles.
-                #   We map pixel value to distance-like factor: higher pixel -> farther from obstacle -> smaller penalty.
-                #   multiplier = 1.0 + cost_weight * (1 - (pv / 255.0))
-                if pv == 0:
-                    multiplier = 1.0
-                else:
-                    multiplier = 1.0 + self.cost_weight * (1.0 - (pv / 255.0))
-
+                base_cost = math.sqrt(2) if dx * dy != 0 else 1.0
+                pv = int(self.map[ny, nx])
+                multiplier = 1.0 if pv == 0 else 1.0 + self.cost_weight * (1.0 - pv / 255.0)
                 movement_cost = base_cost * multiplier
                 tentative_g = current.g_cost + movement_cost
-                
-                # Only push/update if we improved g-score for this neighbour
-                if tentative_g < best_g.get(next_pos, float('inf')):
-                    best_g[next_pos] = tentative_g
-                    next_node = Node(next_pos)
-                    next_node.g_cost = tentative_g
-                    next_node.h_cost = self.heuristic(next_pos, goal)
+
+                if tentative_g < best_g.get((nx, ny), float('inf')):
+                    best_g[(nx, ny)] = tentative_g
+                    next_node = Node((nx, ny), tentative_g, self.heuristic((nx, ny), goal))
                     next_node.parent = current
                     heappush(open_set, next_node)
-        
-        return None  # No path found
+
+        return None
+
     
 
 def main():
 
-    robot = Robot(0)
-    map = Map(map_path, map_scale_path)
-    astar = AStar(map_path, map_scale_path)
-    start = (800, 1500)  # (x, y) in pixels
-    goal = (730, 80)   # (x, y) in pixels
-        # robot.get_pose_continuous()
+    robot = Robot(1)
+    map_data = Map(map_path, map_scale_path)
+    map_data.create_gradient_around_obstacles(map_path, radius = 2)
+
+    astar = AStar(map_data)
     
-    update_Position = threading.Thread(target=robot.get_pose_continuous(), args=())
+    print("Starting robot pose thread...")
+    update_Position = threading.Thread(target=robot.get_pose_continuous, args=())
     update_Position.daemon = True
     update_Position.start()
 
-    gradient_map = map.create_gradient_around_obstacles(map_path, radius = 2.5)
+    print("Getting start position...")
+    while robot.position_world is None or np.linalg.norm(robot.position_world) < 1e-6:
+        print("Waiting for robot pose...")
+        time.sleep(0.1)
+
+    print(robot.position_world)
+    wx,wy = map_data.world_to_pgm(robot.position_world[0], robot.position_world[1])
+    start = (wx,wy)
+    # print(start)
+    goal = (300, 200)
+
 
     print("Starting A* pathfinding...")
     path = astar.find_path(start, goal)
+    if(path is None):
+        print("No path found.")
+        exit(1)
+
     print("Path found!")
 
-    visualize_path(map_path, path, output_path=None)
-    result = visualize_path(map_path, path, output_path = None)
-    cv2.imshow("Path", result)
+
+
+    # visualize_path(map_path, path, output_path=None)
+    result = visualize_path(map_data, path, use_gradient=True, color=(0, 0, 255), thickness=2)
+
+    # converting path points to world coordinates for robot navigation
+    world_path = []
+
+    robot.followpath(world_path)
+
+    cv2.namedWindow('My Resizable Window', cv2.WINDOW_NORMAL)
+    cv2.imshow('My Resizable Window', result)
+    while True:
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27 or key == ord('q'):
+            break
+        # print(robot.position)
+
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+    update_Position.join()
 
 
 if __name__ == "__main__":
