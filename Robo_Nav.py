@@ -5,6 +5,9 @@ import math
 import time
 from heapq import heappush, heappop
 import threading
+import socket
+import json
+import atexit
 
 camera_mtx_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Calibration_Data\camera_mtx.txt"
 camera_dist_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Calibration_Data\camera_dist.txt"
@@ -19,6 +22,57 @@ map_scale_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter
 height = 720
 width = 1280
 # ---- helpers ----
+def shutdown(HOST = "192.168.0.103"):
+    PORT = 7002 # TCP port on the Phidget 
+
+    byteData = json.dumps({ "x": 0,
+                        "circle": 0,
+                        "square": 0,
+                        "triangle": 0,
+                        "share": 0,
+                        "PS": 0,
+                        "options": 0,
+                        "left_stick_click": 0,
+                        "right_stick_click": 0,
+                        "L1": 0,
+                        "R1": 0,
+                        "up_arrow": 0,
+                        "down_arrow": 0,
+                        "left_arrow": 0,
+                        "right_arrow": 0,
+                        "touchpad": 0,
+
+                        "left_joystick_x": 0,
+                        "left_joystick_y": 0,
+                        "right_joystick_x": 0,
+                        "right_joystick_y": 0,
+
+                        "left_trigger": 0,
+                        "right_trigger": 0,
+
+                        "control": "idle",
+                        "lights": "r"
+                        })
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        try:
+            client.settimeout(1)
+            client.connect((HOST, PORT))
+            client.send(byteData)
+        except:
+            print("SOCKET ERROR")
+            return 0
+    
+    return 1
+
+def get_distance(p1, p2):
+        return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+
+def is_near(pt1, pt2, threshold):
+    if(get_distance(pt1, pt2)) <= threshold:
+        return True
+    return False
+
 def pose_to_matrix(rvec, tvec):
     R, _ = cv2.Rodrigues(rvec)
     T = np.eye(4, dtype=float)
@@ -41,8 +95,25 @@ def parse_scale(scale_path=r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25
                     break
     raise ValueError(f"pixels_per_meter not found or invalid in {scale_path}")
 
-import cv2
-import numpy as np
+def sendToPhidget(HOST, data): # IP address of the Phidget on XOVER
+    PORT = 7002 # TCP port on the Phidget 
+
+    if(HOST == ''):
+        # print("INVALID VEHICLE INDEX")
+        return
+
+    byteData = data.encode()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        try:
+            client.settimeout(1)
+            client.connect((HOST, PORT))
+            client.send(byteData)
+        except:
+            print("ERROR")
+            return 0
+    
+    return 1
 
 def visualize_path(map_obj, path, use_gradient=False, color=(0, 0, 255), thickness=2, robot_position = (0,0)):
     """
@@ -106,9 +177,38 @@ class Map:
 
         print(f"[Map] Loaded scale: {self.scale} px/m, width: {self.map_width}px, height: {self.map_height}px")
 
-    def pixel_to_world(self, pixel_coords):
-        """Convert pixel coordinates to world coordinates (meters)."""
-        return pixel_coords * self.scale
+    def path_to_world(self, path):
+        new_path = []
+        for point in path:
+            new_point = self.pgm_to_world(point[0], point[1])
+            new_path.append(new_point)
+        return new_path
+
+    def pgm_to_world(self, px, py):
+        """
+        Convert pixel coordinates (px, py) from a PGM map into world coordinates (xw, yw)
+        in meters, using the metadata from the _scale.txt file.
+
+        Args:
+            px, py : int
+                Pixel coordinates in the PGM image (origin at top-left, y downward).
+
+        Returns:
+            (xw, yw) : tuple of floats
+                World coordinates in meters.
+        """
+
+        # Extract required parameters
+        scale = self.params["pixels_per_meter"]
+        min_x = self.params["min_x_m"]
+        max_y = self.params["max_y_m"]  # for Y-axis inversion
+
+        # Compute world coordinates
+        xw = px / scale + min_x
+        yw = max_y - (py / scale)
+
+        return xw, yw
+
 
     def world_to_pgm(self, xw, yw):
         """
@@ -184,6 +284,187 @@ class Map:
         # Store in class instance
         self.gradient_map = grad
         return grad
+    
+    def get_goal_gui(self):
+        goal = (0,0)
+        return goal
+
+class EKF3:
+    def __init__(self, dt=0.1):
+        self.x = np.array([0.0, 0.0, 0.0])  # state: x, y, heading
+        self.P = np.eye(3) * 0.1
+
+        # Motion noise (tune as needed)
+        self.Q = np.diag([0.02, 0.02, 0.01])
+
+        # Measurement noise for x, y, heading
+        self.R = np.diag([0.05, 0.05, 0.02])
+
+        self.dt = dt
+
+    # --------------------------------------------------
+    # Nonlinear motion model
+    # --------------------------------------------------
+    def f(self, x, u):
+        v, w = u
+        dt = self.dt
+        th = x[2]
+
+        return np.array([
+            x[0] + v * np.cos(th) * dt,
+            x[1] + v * np.sin(th) * dt,
+            th + w * dt
+        ])
+
+    def F_jac(self, x, u):
+        v, w = u
+        dt = self.dt
+        th = x[2]
+        return np.array([
+            [1, 0, -v * np.sin(th) * dt],
+            [0, 1,  v * np.cos(th) * dt],
+            [0, 0, 1]
+        ])
+
+    # --------------------------------------------------
+    # Measurement model: z = [x, y, heading]
+    # --------------------------------------------------
+    def h(self, x):
+        return x.copy()
+
+    def H_jac(self, x):
+        return np.eye(3)
+
+    # --------------------------------------------------
+    # Prediction step
+    # --------------------------------------------------
+    def predict(self, v, w):
+        u = np.array([v, w])
+        self.x = self.f(self.x, u)
+        F = self.F_jac(self.x, u)
+        self.P = F @ self.P @ F.T + self.Q
+        self.x[2] = self.normalize_angle(self.x[2])
+
+    # --------------------------------------------------
+    # Update step
+    # --------------------------------------------------
+    def update(self, z):
+        z = np.array(z)
+
+        z_pred = self.h(self.x)
+        H = self.H_jac(self.x)
+
+        # Innovation
+        y = z - z_pred
+        y[2] = self.normalize_angle(y[2])   # fix angle wrap
+
+        S = H @ self.P @ H.T + self.R
+        K = self.P @ H.T @ np.linalg.inv(S)
+
+        self.x = self.x + K @ y
+        self.x[2] = self.normalize_angle(self.x[2])
+
+        self.P = (np.eye(3) - K @ H) @ self.P
+
+    @staticmethod
+    def normalize_angle(a):
+        return (a + np.pi) % (2*np.pi) - np.pi
+
+class PIDController:
+    def __init__(self, Kp, Ki, Kd):
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+        self.integral = 0.0
+        self.prev_error = 0.0
+
+    def angle_wrap(self, angle):
+        """Wrap angle to [-pi, pi]."""
+        return (angle + math.pi) % (2 * math.pi) - math.pi
+
+    def update(self, current_heading, previous_heading, dt, target_angular_velocity):
+        # Compute measured angular velocity
+        delta_heading = self.angle_wrap(current_heading - previous_heading)
+        # print(delta_heading)
+        if(dt != 0):
+            measured_angular_velocity = delta_heading / dt
+        else:
+            print("DT: ERROR")
+            measured_angular_velocity = target_angular_velocity
+
+        # Compute error
+        error = target_angular_velocity - measured_angular_velocity
+        # print(error)
+        # if (measured_angular_velocity <= 0.1+target_angular_velocity and measured_angular_velocity >= target_angular_velocity - 0.1 ):
+        # PID terms
+        self.integral += error * dt
+        derivative = (error - self.prev_error) / dt if dt > 0 else 0.0
+
+        # PID output
+        output = self.Kp * error + self.Ki * self.integral + self.Kd * derivative
+
+        # Store error for next iteration
+        self.prev_error = error
+
+        return output, measured_angular_velocity
+
+class FollowTheCarrot:
+    def __init__(self, lookahead_distance=1, Kp=1.0):
+        """
+        lookahead_distance: how far ahead the carrot point should be (in meters)
+        Kp: proportional gain for angular velocity control
+        """
+        self.lookahead_distance = lookahead_distance
+        self.Kp = Kp
+
+    def find_carrot_point(self, robot_pos, path):
+        """
+        Find the carrot (lookahead) point along the path.
+        """
+        if not path:
+            return None
+        
+        # Find the closest point on the path to the robot
+        dists = [get_distance(robot_pos, p) for p in path]
+        closest_idx = min(range(len(dists)), key=dists.__getitem__)
+
+        # Move forward along the path until the lookahead distance is reached
+        for i in range(closest_idx, len(path) - 1):
+            segment_dist = get_distance(robot_pos, path[i])
+            if segment_dist >= self.lookahead_distance:
+                return path[i]
+        
+        # If end of path reached
+        return path[-1]
+
+    def compute_control(self, robot_pos, robot_heading, path, linear_speed=0.5):
+        """
+        Compute linear and angular velocities to follow the path.
+        robot_pos: (x, y)
+        robot_heading: current heading in radians (0 = x-axis)
+        path: list of (x, y) waypoints in world coordinates
+        """
+        carrot = self.find_carrot_point(robot_pos, path)
+        if carrot is None:
+            return 0.0, 0.0  # no movement if no path
+        
+        # Compute angle to carrot
+        dx = carrot[0] - robot_pos[0]
+        dy = carrot[1] - robot_pos[1]
+        target_heading = math.atan2(dy, dx)
+
+        # Compute heading error (wrap to [-pi, pi])
+        heading_error = (target_heading - robot_heading + math.pi) % (2 * math.pi) - math.pi
+        # print(heading_error)
+
+        # Angular velocity control (proportional)
+        angular_velocity = self.Kp * heading_error
+        print(self.Kp)
+
+        
+
+        # Return control signals
+        return linear_speed, angular_velocity, carrot
 
 """ Class to update and store robot pose estimation"""
 class Robot:
@@ -191,8 +472,19 @@ class Robot:
         self.position_world = (0,0)  # x, y in meters OF WORLD FRAME
         self.position_frame = (0,0)  # x, y in meters OF ROBOT FRAME
         self.heading = 0.0  # theta in radians
-        self.ip_address = "192.168.0.101" # IP of the robot
+        self.prev_heading = 0.0
+        self.angle_pid = PIDController(Kp=2, Ki=0.0, Kd=0.0)
+        self.ekf = EKF3()
+
+        self.last_reading = time.time()
+        self.lad = 0.5 # look ahead distance
+
+        self.ip_address = "192.168.0.103" # IP of the robot
         self.size = (0.75, 1) # in meters
+        self.wheel_size = 0.2 # in meters
+        self.left_wheel_speed = 0.0 #between -10 and 10q
+        self.right_wheel_speed = 0.0 #between -10 and 10
+
         self.cam_index = cam
         self.camera_matrix = np.loadtxt(camera_mtx_path, delimiter=',')
         self.dist_coeffs = np.loadtxt(camera_dist_path, delimiter=',')
@@ -203,7 +495,7 @@ class Robot:
             raise RuntimeError("Homography failed. Check image/world correspondences.")
         self.Hw = np.linalg.inv(self.H)
 
-        # try load camera extrinsics (optional)
+        # try load camera extriqnsics (optional)
         have_cam_extrinsics = os.path.exists(cam_rvec_path) and os.path.exists(cam_tvec_path)
         if have_cam_extrinsics:
             self.cam_rvec = np.load(cam_rvec_path)
@@ -227,8 +519,37 @@ class Robot:
             [-self.marker_length / 2, -self.marker_length / 2, 0]
         ], dtype=np.float32).reshape((4, 1, 3))
 
+    def update_ekf_with_camera(self, x, y, yaw):
+    # Full measurement: x, y, heading
+        self.ekf.update((x, y, yaw))
+
+        # Update robot pose from EKF output
+        self.position_world = (self.ekf.x[0], self.ekf.x[1])
+        self.heading = self.ekf.x[2]
+
+    def update_ekf_prediction(self):
+        v, w = self.compute_odometry()
+        self.ekf.predict(v, w)
+        self.position_world = (self.ekf.x[0], self.ekf.x[1])
+        self.heading = self.ekf.x[2]
+
+    def compute_odometry(self):
+        # Differential drive kinematics
+        L = self.size[0]          # wheel separation
+        r = self.wheel_size / 2   # wheel radius
+
+        v_l = self.left_wheel_speed  * r
+        v_r = self.right_wheel_speed * r
+
+        v = (v_r + v_l) / 2
+        w = (v_r - v_l) / L
+
+        return v, w
+
+
     
     def get_pose_continuous(self):
+
         """TODO: Import code from Track_homo that returns the robot's position_world and orientation 
             Consider making this its own thread and making the pose atomic. other option is not making it atomic and assuming it wont matter"""
         cap = cv2.VideoCapture(self.cam_index, cv2.CAP_DSHOW)
@@ -242,6 +563,8 @@ class Robot:
             if not ret:
                 break
             # frame_idx += 1
+
+            self.update_ekf_prediction()
 
             # undistort frame
             frame_und = cv2.undistort(frame, self.camera_matrix, self.dist_coeffs)
@@ -289,44 +612,101 @@ class Robot:
                                 marker_info["yaw_world_from_pose"] = yaw_world
 
                                 x, y = marker_info["center_world"]
-                                self.position_world = (x, y)
+                                # Full measurement: x, y, heading
+                                self.update_ekf_with_camera(x, y, yaw_world)
+                                
                     except Exception:
                         pass
 
                     world_markers.append(marker_info)
 
-            # ---- OpenCV overlay ----
-            vis = frame_und.copy()
-            for m in world_markers:
-                pts = m["img_corners"].astype(int)
-                cv2.polylines(vis, [pts.reshape(-1,1,2)], isClosed=True, color=(0,255,0), thickness=2)
-                img_center = cv2.perspectiveTransform(np.array([[m["center_world"]]], dtype=np.float32), self.Hw)[0,0]
-                cv2.circle(vis, (int(img_center[0]), int(img_center[1])), 4, (0,0,255), -1)
-                cv2.putText(vis, f"id:{m['id']}", (int(img_center[0])+5, int(img_center[1])-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
-                tip_world = m["center_world"] + np.array([math.cos(m["yaw"]), math.sin(m["yaw"])]) * (self.marker_length * 0.75)
-                tip_img = cv2.perspectiveTransform(np.array([[tip_world]], dtype=np.float32), self.Hw)[0,0]
-                cv2.arrowedLine(vis, (int(img_center[0]), int(img_center[1])), (int(tip_img[0]), int(tip_img[1])), (0,0,255), 2, tipLength=0.2)
+            """ ---- OpenCV overlay ----"""
+            # vis = frame_und.copy()
+            # for m in world_markers:
+            #     pts = m["img_corners"].astype(int)
+            #     cv2.polylines(vis, [pts.reshape(-1,1,2)], isClosed=True, color=(0,255,0), thickness=2)
+            #     img_center = cv2.perspectiveTransform(np.array([[m["center_world"]]], dtype=np.float32), self.Hw)[0,0]
+            #     cv2.circle(vis, (int(img_center[0]), int(img_center[1])), 4, (0,0,255), -1)
+            #     cv2.putText(vis, f"id:{m['id']}", (int(img_center[0])+5, int(img_center[1])-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
+            #     tip_world = m["center_world"] + np.array([math.cos(m["yaw"]), math.sin(m["yaw"])]) * (self.marker_length * 0.75)
+            #     tip_img = cv2.perspectiveTransform(np.array([[tip_world]], dtype=np.float32), self.Hw)[0,0]
+            #     cv2.arrowedLine(vis, (int(img_center[0]), int(img_center[1])), (int(tip_img[0]), int(tip_img[1])), (0,0,255), 2, tipLength=0.2)
 
-            # show frame
+            """show frame"""
             # cv2.imshow("ArUco realtime (undistorted)", vis)
             key = cv2.waitKey(1)
             if key == 27 or key == ord('q'):
                 break
 
-
-        return None
-    
-    def followpath(self, path):
+        return None    
+    def followpath(self, path, goal,_navigator):
         # TODO: get robot position, compute angular velocity and linear velocity to follow path
         # Set linear and angular velocities
-        return l_vel, a_vel
+        navigator = _navigator
+        while is_near(self.position_world, goal, 1) is False:
+            # print(self.position_world, goal)
+            lvelo, avelo, carrot = navigator.compute_control(self.position_world, self.heading, path, 1)
+            self.set_wheel_speeds(lvelo, avelo)
+            
+        self.set_wheel_speeds(0,0)
+        return True
 
-    def l_vel_pid(self):
+
+    def set_linear_velo(self):
 
         return None
     
-    def a_vel_pid(self):
-        return None
+    def set_angular_velo(self, angular_velocity):
+        # print(time.time()  - self.last_reading)
+        output, curr_angluar_velo = self.angle_pid.update(self.heading, self.prev_heading, time.time() - self.last_reading, angular_velocity)
+        return output
+    
+    def set_wheel_speeds(self,lvelo, avelo):
+        angular_wheel_speed = self.set_angular_velo(avelo)
+        linear_wheel_speed = lvelo  # some constant forward speed
+        self.left_wheel_speed = linear_wheel_speed + (-angular_wheel_speed * self.wheel_size/ 2)
+        self.right_wheel_speed = linear_wheel_speed + (angular_wheel_speed * self.wheel_size/ 2)
+        return self.left_wheel_speed, self.right_wheel_speed
+    
+    def send_wheel_speeds(self):
+        # left_speed, right_speed = self.set_wheel_speeds(lvelo, avelo)
+        while True:
+            left = min(max(self.left_wheel_speed, -10), 10)
+            right = min(max(self.right_wheel_speed, -10), 10)
+
+            data = json.dumps({ "x": 0,
+                            "circle": 0,
+                            "square": 0,
+                            "triangle": 0,
+                            "share": 0,
+                            "PS": 0,
+                            "options": 0,
+                            "left_stick_click": 0,
+                            "right_stick_click": 0,
+                            "L1": 0,
+                            "R1": 0,
+                            "up_arrow": 0,
+                            "down_arrow": 0,
+                            "left_arrow": 0,
+                            "right_arrow": 0,
+                            "touchpad": 0,
+
+                            "left_joystick_x": 0,
+                            "left_joystick_y": 0,
+                            "right_joystick_y": left,
+                            "right_joystick_x": right,
+
+                            "left_trigger": 0,
+                            "right_trigger": 0,
+
+                            "control": "auton",
+                            "lights": "g"
+                            })
+
+            #TODO: get old code to send to the phidget
+            sendToPhidget(self.ip_address, data)
+            # print("Sent\nLeft: ", left, "Right: ", right)
+            time.sleep(0.06)
         
 """ Uses map and AStar to create a path for the robot """
 class Node:
@@ -430,15 +810,45 @@ class AStar:
 
         return None
 
-    
+
+    def smooth_path(self, path, window_size=3):
+        """
+        Smooth a path using a simple moving average filter.
+        path: list of (x, y) waypoints
+        window_size: number of neighboring points to average over
+        """
+
+        if window_size < 2:
+            return path  # no smoothing needed
+
+        smoothed = []
+        half_window = window_size // 2
+        n = len(path)
+        
+        for i in range(n):
+            # compute window bounds
+            start = max(0, i - half_window)
+            end = min(n, i + half_window + 1)
+            
+            # average over the window
+            window_points = np.array(path[start:end])
+            smoothed_point = (np.mean(window_points, axis=0))
+            smoothed_point_int = tuple(map(int, smoothed_point))
+            smoothed.append(tuple(smoothed_point_int))
+        
+        return smoothed
+
+
 
 def main():
-
+    atexit.register(shutdown)
     robot = Robot(1)
     map_data = Map(map_path, map_scale_path)
     map_data.create_gradient_around_obstacles(map_path, radius = 2)
 
     astar = AStar(map_data)
+
+    navigator = FollowTheCarrot(1, 2)
     
     print("Starting robot pose thread...")
     update_Position = threading.Thread(target=robot.get_pose_continuous, args=())
@@ -453,38 +863,49 @@ def main():
     print(robot.position_world)
     wx,wy = map_data.world_to_pgm(robot.position_world[0], robot.position_world[1])
     start = (wx,wy)
-    # print(start)
-    goal = (300, 200)
+    goal = (1500, 1300)
+    goal_world = map_data.pgm_to_world(goal[0], goal[1])
+
+    print("Start (world): ", robot.position_world)
+    print("Goal (world): ", goal_world)
 
 
     print("Starting A* pathfinding...")
     path = astar.find_path(start, goal)
+    smooth_path = astar.smooth_path(path, 60)
     if(path is None):
         print("No path found.")
         exit(1)
 
     print("Path found!")
-
+    print("Starting robot data thread")
+    send_data = threading.Thread(target=robot.send_wheel_speeds, args=())
+    send_data.daemon = True
+    send_data.start()
 
 
     # visualize_path(map_path, path, output_path=None)
-    result = visualize_path(map_data, path, use_gradient=True, color=(0, 0, 255), thickness=2)
-
-    # converting path points to world coordinates for robot navigation
-    world_path = []
-
-    robot.followpath(world_path)
-
+    # result = visualize_path(map_data, path, use_gradient=True, color=(0, 0, 255), thickness=2)
+    result = visualize_path(map_data, smooth_path, use_gradient=True, color=(0, 0, 255), thickness=2)
+    mirror = cv2.flip(result, 1)
     cv2.namedWindow('My Resizable Window', cv2.WINDOW_NORMAL)
-    cv2.imshow('My Resizable Window', result)
+    cv2.imshow('My Resizable Window', mirror)
     while True:
         key = cv2.waitKey(1) & 0xFF
         if key == 27 or key == ord('q'):
             break
-        # print(robot.position)
-
-    cv2.waitKey(0)
     cv2.destroyAllWindows()
+
+    """converting path points to world coordinates for robot navigation"""
+    world_path = map_data.path_to_world(smooth_path)
+    robot.followpath(world_path, goal_world, navigator)
+    # print(world_path)
+
+
+
+
+
+    os._exit(0)
     update_Position.join()
 
 
