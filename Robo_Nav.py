@@ -21,7 +21,22 @@ map_scale_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter
 
 height = 720
 width = 1280
+import math
+
 # ---- helpers ----
+def rad2deg_wrapped(rad):
+    """Convert radians to degrees (wrapped to [-180, 180])."""
+    deg = rad * 180.0 / math.pi
+    return deg
+
+def angle_diff_deg(a, b):
+    """
+    Smallest signed difference between two angles in degrees.
+    Returns a value in [-180, 180].
+    """
+    diff = (a - b + 180) % 360 - 180
+    return diff
+
 def shutdown(HOST = "192.168.0.103"):
     PORT = 7002 # TCP port on the Phidget 
 
@@ -80,7 +95,6 @@ def pose_to_matrix(rvec, tvec):
     T[:3, 3] = tvec.flatten()
     return T
 
-""" Class which contains map data and scale information"""
 def parse_scale(scale_path=r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter\map_scale.txt", item='pixels_per_meter'):
     """Read pixels_per_meter from scale file (expects 'pixels_per_meter: <value>')."""
     if not os.path.exists(scale_path):
@@ -115,7 +129,7 @@ def sendToPhidget(HOST, data): # IP address of the Phidget on XOVER
     
     return 1
 
-def visualize_path(map_obj, path, use_gradient=False, color=(0, 0, 255), thickness=2, robot_position = (0,0)):
+def visualize_path(map_obj, path, start, use_gradient=False, color=(0, 0, 255), thickness=2):
     """
     Visualize a path over the map or gradient map.
 
@@ -149,10 +163,10 @@ def visualize_path(map_obj, path, use_gradient=False, color=(0, 0, 255), thickne
         cv2.line(base_bgr, path[i - 1], path[i], color, thickness)
     
     # Draw robot position
-    cv2.circle(base_bgr, path[0], radius=5, color=(255, 0, 0), thickness=-1)  # Start
+    cv2.circle(base_bgr, start, radius=5, color=(0, 255, 0), thickness=-1)  # Start
     cv2.circle(base_bgr, path[-1], radius=5, color=(0, 0, 255), thickness=-1) # End
 
-    cv2.circle(base_bgr, robot_position, radius=5, color=(255, 155, 0), thickness=-1)  # Start
+    # cv2.circle(base_bgr, robot_position, radius=5, color=(255, 155, 0), thickness=-1)  # Start
 
     return base_bgr
 
@@ -288,17 +302,17 @@ class Map:
     def get_goal_gui(self):
         goal = (0,0)
         return goal
-
+"""Extended Three dimensional Kalman Filter, not correctly tuned as math for a slipping wheel robot is hard"""
 class EKF3:
     def __init__(self, dt=0.1):
         self.x = np.array([0.0, 0.0, 0.0])  # state: x, y, heading
         self.P = np.eye(3) * 0.1
 
         # Motion noise (tune as needed)
-        self.Q = np.diag([0.02, 0.02, 0.01])
+        self.Q = np.diag([0.002, 0.002, 0.001])
 
         # Measurement noise for x, y, heading
-        self.R = np.diag([0.05, 0.05, 0.02])
+        self.R = np.diag([0.005, 0.005, 0.005])
 
         self.dt = dt
 
@@ -369,7 +383,7 @@ class EKF3:
     @staticmethod
     def normalize_angle(a):
         return (a + np.pi) % (2*np.pi) - np.pi
-
+"""Class for PID controller"""
 class PIDController:
     def __init__(self, Kp, Ki, Kd):
         self.Kp = Kp
@@ -407,7 +421,7 @@ class PIDController:
         self.prev_error = error
 
         return output, measured_angular_velocity
-
+"""Navigator class: Basic follow the carrot"""
 class FollowTheCarrot:
     def __init__(self, lookahead_distance=1, Kp=1.0):
         """
@@ -416,6 +430,7 @@ class FollowTheCarrot:
         """
         self.lookahead_distance = lookahead_distance
         self.Kp = Kp
+        print("Follow the Carror kP = ", self.Kp)
 
     def find_carrot_point(self, robot_pos, path):
         """
@@ -437,43 +452,52 @@ class FollowTheCarrot:
         # If end of path reached
         return path[-1]
 
-    def compute_control(self, robot_pos, robot_heading, path, linear_speed=0.5):
-        """
-        Compute linear and angular velocities to follow the path.
-        robot_pos: (x, y)
-        robot_heading: current heading in radians (0 = x-axis)
-        path: list of (x, y) waypoints in world coordinates
-        """
+    def compute_control(self, robot_pos, robot_heading, path, base_speed):
+
         carrot = self.find_carrot_point(robot_pos, path)
         if carrot is None:
             return 0.0, 0.0  # no movement if no path
-        
+
         # Compute angle to carrot
         dx = carrot[0] - robot_pos[0]
         dy = carrot[1] - robot_pos[1]
-        target_heading = math.atan2(dy, dx)
 
-        # Compute heading error (wrap to [-pi, pi])
-        heading_error = (target_heading - robot_heading + math.pi) % (2 * math.pi) - math.pi
-        # print(heading_error)
+        print("Robot: ", robot_pos, "Carrot:", carrot)
+
+        target_heading = rad2deg_wrapped(math.atan2(dy, dx))
+
+        robot_heading = rad2deg_wrapped(robot_heading)
+
+        heading_error = angle_diff_deg(robot_heading, target_heading)
+
+        print(heading_error)
 
         # Angular velocity control (proportional)
+
+        if (heading_error < 7.5 and heading_error > -7.5 ):
+            linear_speed = (base_speed * (1/heading_error)) * 0.3 #greater the heading error, the slower the base turns
+            heading_error = 0
+        else:
+            print("Just turning")
+            linear_speed = 0
+
         angular_velocity = self.Kp * heading_error
-        print(self.Kp)
-
-        
-
+        # print(self.Kp)
+        # print(angular_velocity, linear_speed)
         # Return control signals
+        time.sleep(0.1)
         return linear_speed, angular_velocity, carrot
+    
 
 """ Class to update and store robot pose estimation"""
 class Robot:
-    def __init__(self, cam):
+    def __init__(self, cam, Kp, Ki, Kd):
         self.position_world = (0,0)  # x, y in meters OF WORLD FRAME
         self.position_frame = (0,0)  # x, y in meters OF ROBOT FRAME
         self.heading = 0.0  # theta in radians
         self.prev_heading = 0.0
-        self.angle_pid = PIDController(Kp=2, Ki=0.0, Kd=0.0)
+        self.angle_pid = PIDController(Kp, Ki, Kd)
+        self.dt = time.time()
         self.ekf = EKF3()
 
         self.last_reading = time.time()
@@ -546,10 +570,9 @@ class Robot:
 
         return v, w
 
-
     
     def get_pose_continuous(self):
-
+        i = 0
         """TODO: Import code from Track_homo that returns the robot's position_world and orientation 
             Consider making this its own thread and making the pose atomic. other option is not making it atomic and assuming it wont matter"""
         cap = cv2.VideoCapture(self.cam_index, cv2.CAP_DSHOW)
@@ -613,13 +636,22 @@ class Robot:
 
                                 x, y = marker_info["center_world"]
                                 # Full measurement: x, y, heading
-                                self.update_ekf_with_camera(x, y, yaw_world)
+                                self.update_ekf_with_camera(x, y, yaw)
+                                # self.position_world = (x,y)
+                                # self.heading = yaw
                                 
                     except Exception:
                         pass
 
                     world_markers.append(marker_info)
-
+                    i = 0
+                    
+            else:
+                i += 1
+                if (i >= 20):
+                    print("NO ROBOT")
+                    shutdown()
+                    os._exit(1)
             """ ---- OpenCV overlay ----"""
             # vis = frame_und.copy()
             # for m in world_markers:
@@ -634,20 +666,24 @@ class Robot:
 
             """show frame"""
             # cv2.imshow("ArUco realtime (undistorted)", vis)
-            key = cv2.waitKey(1)
-            if key == 27 or key == ord('q'):
-                break
+            # key = cv2.waitKey(1)
+            # if key == 27 or key == ord('q'):
+                # break
 
         return None    
     def followpath(self, path, goal,_navigator):
         # TODO: get robot position, compute angular velocity and linear velocity to follow path
         # Set linear and angular velocities
         navigator = _navigator
+        self.dt = time.time()
         while is_near(self.position_world, goal, 1) is False:
             # print(self.position_world, goal)
-            lvelo, avelo, carrot = navigator.compute_control(self.position_world, self.heading, path, 1)
+            lvelo, avelo, carrot = navigator.compute_control(self.position_world, self.heading, path, .75)
+            # print(lvelo)
             self.set_wheel_speeds(lvelo, avelo)
-            
+        
+        print("I MADE ITTTTTTT!!!!!!!!!!!!!!!!!!!!!")
+        print(self.position_world)
         self.set_wheel_speeds(0,0)
         return True
 
@@ -664,6 +700,7 @@ class Robot:
     def set_wheel_speeds(self,lvelo, avelo):
         angular_wheel_speed = self.set_angular_velo(avelo)
         linear_wheel_speed = lvelo  # some constant forward speed
+        # print(lvelo)
         self.left_wheel_speed = linear_wheel_speed + (-angular_wheel_speed * self.wheel_size/ 2)
         self.right_wheel_speed = linear_wheel_speed + (angular_wheel_speed * self.wheel_size/ 2)
         return self.left_wheel_speed, self.right_wheel_speed
@@ -706,9 +743,8 @@ class Robot:
             #TODO: get old code to send to the phidget
             sendToPhidget(self.ip_address, data)
             # print("Sent\nLeft: ", left, "Right: ", right)
-            time.sleep(0.06)
-        
-""" Uses map and AStar to create a path for the robot """
+            time.sleep(0.1)
+""" Helper Class for Astar"""
 class Node:
     def __init__(self, position, g_cost=float('inf'), h_cost=0):
         self.position = position  # (x, y) tuple
@@ -721,7 +757,7 @@ class Node:
     
     def __lt__(self, other):
         return self.f_cost() < other.f_cost()
-
+"""Uses Map class to create a path using A star"""
 class AStar:
     def __init__(self, map_obj, cost_weight=2.0):
         """
@@ -839,16 +875,27 @@ class AStar:
         return smoothed
 
 
+"""Main control loop
+    Step 1: Initialize and find location of robot
+    Step 2: Input goal location (either x,y) of world or from a gui
+    Step 3: Create a path 
+    Step 4: Accept path
+    Step 5: Start Navigation
+    Step 6 repeat at Step 2
+"""
 
 def main():
+
+    path_buffer = 50
+
     atexit.register(shutdown)
-    robot = Robot(1)
+    robot = Robot(1, 0.6, 0.0001, 0.1)
     map_data = Map(map_path, map_scale_path)
     map_data.create_gradient_around_obstacles(map_path, radius = 2)
 
     astar = AStar(map_data)
 
-    navigator = FollowTheCarrot(1, 2)
+    navigator = FollowTheCarrot(.3, .8)
     
     print("Starting robot pose thread...")
     update_Position = threading.Thread(target=robot.get_pose_continuous, args=())
@@ -856,37 +903,41 @@ def main():
     update_Position.start()
 
     print("Getting start position...")
+    print("Waiting for robot pose...")
     while robot.position_world is None or np.linalg.norm(robot.position_world) < 1e-6:
-        print("Waiting for robot pose...")
         time.sleep(0.1)
 
-    print(robot.position_world)
+    # print(robot.position_world)
     wx,wy = map_data.world_to_pgm(robot.position_world[0], robot.position_world[1])
     start = (wx,wy)
-    goal = (1500, 1300)
+    # start = (800, 200)
+    goal = (500, 1400)
+
+    # start_world = map_data.pgm_to_world(start[0], start[1])
     goal_world = map_data.pgm_to_world(goal[0], goal[1])
 
-    print("Start (world): ", robot.position_world)
+    print("Robot Position (world): ", robot.position_world)
+    # print("Start (world): ", start_world)
     print("Goal (world): ", goal_world)
-
 
     print("Starting A* pathfinding...")
     path = astar.find_path(start, goal)
-    smooth_path = astar.smooth_path(path, 60)
+    smooth_path = astar.smooth_path(path, 80)
     if(path is None):
         print("No path found.")
         exit(1)
+    # print("Path found!")
 
-    print("Path found!")
-    print("Starting robot data thread")
-    send_data = threading.Thread(target=robot.send_wheel_speeds, args=())
-    send_data.daemon = True
-    send_data.start()
+    print(len(smooth_path))
+    for i in range(path_buffer):
+        smooth_path.pop(0)
+        # print("Point: ", i)
+    
+    # print(len(smooth_path))
+    print("Cleared first ", path_buffer, " points")
 
 
-    # visualize_path(map_path, path, output_path=None)
-    # result = visualize_path(map_data, path, use_gradient=True, color=(0, 0, 255), thickness=2)
-    result = visualize_path(map_data, smooth_path, use_gradient=True, color=(0, 0, 255), thickness=2)
+    result = visualize_path(map_data, smooth_path, start, use_gradient=False, color=(0, 0, 255), thickness=2)
     mirror = cv2.flip(result, 1)
     cv2.namedWindow('My Resizable Window', cv2.WINDOW_NORMAL)
     cv2.imshow('My Resizable Window', mirror)
@@ -898,16 +949,21 @@ def main():
 
     """converting path points to world coordinates for robot navigation"""
     world_path = map_data.path_to_world(smooth_path)
+    print("First point: ", world_path[0])    
+
+    # print("Starting robot data thread")
+    # send_data = threading.Thread(target=robot.send_wheel_speeds, args=())
+    # send_data.daemon = True
+    # send_data.start()
+
     robot.followpath(world_path, goal_world, navigator)
     # print(world_path)
 
 
-
-
+    shutdown()
 
     os._exit(0)
     update_Position.join()
-
 
 if __name__ == "__main__":
     main()
