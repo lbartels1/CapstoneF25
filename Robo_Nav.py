@@ -21,7 +21,7 @@ map_scale_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter
 
 height = 720
 width = 1280
-import math
+np.set_printoptions(legacy='1.25')
 
 # ---- helpers ----
 def rad2deg_wrapped(rad):
@@ -67,6 +67,50 @@ def shutdown(HOST = "192.168.0.103"):
 
                         "control": "idle",
                         "lights": "r"
+                        })
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        try:
+            client.settimeout(1)
+            client.connect((HOST, PORT))
+            client.send(byteData)
+        except:
+            print("SOCKET ERROR")
+            return 0
+    
+    return 1
+
+def goal_reached(robot, HOST = "192.168.0.103"):
+    PORT = 7002 # TCP port on the Phidget 
+    robot.left_wheel_speed = 0
+    robot.right_wheel_speed = 0
+    byteData = json.dumps({ "x": 0,
+                        "circle": 0,
+                        "square": 0,
+                        "triangle": 0,
+                        "share": 0,
+                        "PS": 0,
+                        "options": 0,
+                        "left_stick_click": 0,
+                        "right_stick_click": 0,
+                        "L1": 0,
+                        "R1": 0,
+                        "up_arrow": 0,
+                        "down_arrow": 0,
+                        "left_arrow": 0,
+                        "right_arrow": 0,
+                        "touchpad": 0,
+
+                        "left_joystick_x": 0,
+                        "left_joystick_y": 0,
+                        "right_joystick_x": 0,
+                        "right_joystick_y": 0,
+
+                        "left_trigger": 0,
+                        "right_trigger": 0,
+
+                        "control": "idle",
+                        "lights": "g"
                         })
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
@@ -163,8 +207,8 @@ def visualize_path(map_obj, path, start, use_gradient=False, color=(0, 0, 255), 
         cv2.line(base_bgr, path[i - 1], path[i], color, thickness)
     
     # Draw robot position
-    cv2.circle(base_bgr, start, radius=5, color=(0, 255, 0), thickness=-1)  # Start
-    cv2.circle(base_bgr, path[-1], radius=5, color=(0, 0, 255), thickness=-1) # End
+    cv2.circle(base_bgr, start, radius=10, color=(0, 255, 0), thickness=-1)  # Start
+    cv2.circle(base_bgr, path[-1], radius=10, color=(0, 0, 255), thickness=-1) # End
 
     # cv2.circle(base_bgr, robot_position, radius=5, color=(255, 155, 0), thickness=-1)  # Start
 
@@ -309,7 +353,7 @@ class EKF3:
         self.P = np.eye(3) * 0.1
 
         # Motion noise (tune as needed)
-        self.Q = np.diag([0.002, 0.002, 0.001])
+        self.Q = np.diag([0.002, 0.002, 0.004])
 
         # Measurement noise for x, y, heading
         self.R = np.diag([0.005, 0.005, 0.005])
@@ -462,7 +506,7 @@ class FollowTheCarrot:
         dx = carrot[0] - robot_pos[0]
         dy = carrot[1] - robot_pos[1]
 
-        print("Robot: ", robot_pos, "Carrot:", carrot)
+        # print("Robot: ", robot_pos, "Carrot:", carrot)
 
         target_heading = rad2deg_wrapped(math.atan2(dy, dx))
 
@@ -474,14 +518,15 @@ class FollowTheCarrot:
 
         # Angular velocity control (proportional)
 
-        if (heading_error < 7.5 and heading_error > -7.5 ):
-            linear_speed = (base_speed * (1/heading_error)) * 0.3 #greater the heading error, the slower the base turns
-            heading_error = 0
+        if (heading_error < 25 and heading_error > -25 ):
+            linear_speed = (base_speed) #greater the heading error, the slower the base turns
+            angular_velocity = self.Kp * heading_error * 1.5
+            # heading_error = 0
         else:
-            print("Just turning")
+            # print("Just turning")
             linear_speed = 0
+            angular_velocity = self.Kp * heading_error
 
-        angular_velocity = self.Kp * heading_error
         # print(self.Kp)
         # print(angular_velocity, linear_speed)
         # Return control signals
@@ -491,7 +536,7 @@ class FollowTheCarrot:
 
 """ Class to update and store robot pose estimation"""
 class Robot:
-    def __init__(self, cam, Kp, Ki, Kd):
+    def __init__(self, cam, speed, tolerance, Kp, Ki, Kd):
         self.position_world = (0,0)  # x, y in meters OF WORLD FRAME
         self.position_frame = (0,0)  # x, y in meters OF ROBOT FRAME
         self.heading = 0.0  # theta in radians
@@ -499,7 +544,8 @@ class Robot:
         self.angle_pid = PIDController(Kp, Ki, Kd)
         self.dt = time.time()
         self.ekf = EKF3()
-
+        self.tolerance = tolerance
+        self.speed = speed
         self.last_reading = time.time()
         self.lad = 0.5 # look ahead distance
 
@@ -676,14 +722,14 @@ class Robot:
         # Set linear and angular velocities
         navigator = _navigator
         self.dt = time.time()
-        while is_near(self.position_world, goal, 1) is False:
+        while is_near(self.position_world, goal, self.tolerance) is False:
             # print(self.position_world, goal)
-            lvelo, avelo, carrot = navigator.compute_control(self.position_world, self.heading, path, .75)
+            lvelo, avelo, carrot = navigator.compute_control(self.position_world, self.heading, path, self.speed)
             # print(lvelo)
             self.set_wheel_speeds(lvelo, avelo)
         
-        print("I MADE ITTTTTTT!!!!!!!!!!!!!!!!!!!!!")
-        print(self.position_world)
+        print("I MADE IT TO: ", self.position_world)
+        # print(self.position_world)
         self.set_wheel_speeds(0,0)
         return True
 
@@ -705,11 +751,11 @@ class Robot:
         self.right_wheel_speed = linear_wheel_speed + (angular_wheel_speed * self.wheel_size/ 2)
         return self.left_wheel_speed, self.right_wheel_speed
     
-    def send_wheel_speeds(self):
+    def send_wheel_speeds(self, stop_event):
         # left_speed, right_speed = self.set_wheel_speeds(lvelo, avelo)
-        while True:
-            left = min(max(self.left_wheel_speed, -10), 10)
-            right = min(max(self.right_wheel_speed, -10), 10)
+        while not stop_event.is_set():
+            left = min(max(self.left_wheel_speed, -2), 2)
+            right = min(max(self.right_wheel_speed, -2), 2)
 
             data = json.dumps({ "x": 0,
                             "circle": 0,
@@ -737,13 +783,13 @@ class Robot:
                             "right_trigger": 0,
 
                             "control": "auton",
-                            "lights": "g"
+                            "lights": "y"
                             })
 
             #TODO: get old code to send to the phidget
             sendToPhidget(self.ip_address, data)
             # print("Sent\nLeft: ", left, "Right: ", right)
-            time.sleep(0.1)
+            time.sleep(0.15)
 """ Helper Class for Astar"""
 class Node:
     def __init__(self, position, g_cost=float('inf'), h_cost=0):
@@ -876,91 +922,90 @@ class AStar:
 
 
 """Main control loop
-    Step 1: Initialize and find location of robot
-    Step 2: Input goal location (either x,y) of world or from a gui
-    Step 3: Create a path 
-    Step 4: Accept path
-    Step 5: Start Navigation
-    Step 6 repeat at Step 2
+    Step 1: Initialize and find location of robot (program)
+    Step 2: Input goal location (either x,y) of world or from a gui (user)
+    Step 3: Create a path (program)
+    Step 4: Accept path (user)
+    Step 5: Start Navigation (user)
+    Step 6 repeat at Step 2 (program)
 """
 
 def main():
 
-    path_buffer = 50
-
+    # path_buffer = 50
+    stop_event = threading.Event()
     atexit.register(shutdown)
-    robot = Robot(1, 0.6, 0.0001, 0.1)
+    robot = Robot(1, 1.5, .5, 0.7, 0.00015, 0.1)
     map_data = Map(map_path, map_scale_path)
     map_data.create_gradient_around_obstacles(map_path, radius = 2)
 
     astar = AStar(map_data)
 
-    navigator = FollowTheCarrot(.3, .8)
+    navigator = FollowTheCarrot(1, .75)
     
     print("Starting robot pose thread...")
     update_Position = threading.Thread(target=robot.get_pose_continuous, args=())
     update_Position.daemon = True
     update_Position.start()
 
-    print("Getting start position...")
-    print("Waiting for robot pose...")
-    while robot.position_world is None or np.linalg.norm(robot.position_world) < 1e-6:
-        time.sleep(0.1)
+    goals = [(6, 3.5), (3,3), (2,8)]
 
-    # print(robot.position_world)
-    wx,wy = map_data.world_to_pgm(robot.position_world[0], robot.position_world[1])
-    start = (wx,wy)
-    # start = (800, 200)
-    goal = (500, 1400)
+    print(goals)
+    for goal in goals:
+        print("Getting start position...")
+        print("Waiting for robot pose...")
+        while robot.position_world is None or np.linalg.norm(robot.position_world) < 1e-6:
+            time.sleep(0.1)
 
-    # start_world = map_data.pgm_to_world(start[0], start[1])
-    goal_world = map_data.pgm_to_world(goal[0], goal[1])
+        # print(robot.position_world)
+        wx,wy = map_data.world_to_pgm(robot.position_world[0], robot.position_world[1])
+        start = (wx,wy)
+        # start = (800, 200)
 
-    print("Robot Position (world): ", robot.position_world)
-    # print("Start (world): ", start_world)
-    print("Goal (world): ", goal_world)
+        gx,gy = map_data.world_to_pgm(goal[0], goal[1])
+        goal = (gx,gy)
 
-    print("Starting A* pathfinding...")
-    path = astar.find_path(start, goal)
-    smooth_path = astar.smooth_path(path, 80)
-    if(path is None):
-        print("No path found.")
-        exit(1)
-    # print("Path found!")
+        # start_world = map_data.pgm_to_world(start[0], start[1])
+        goal_world = map_data.pgm_to_world(goal[0], goal[1])
 
-    print(len(smooth_path))
-    for i in range(path_buffer):
-        smooth_path.pop(0)
-        # print("Point: ", i)
-    
-    # print(len(smooth_path))
-    print("Cleared first ", path_buffer, " points")
+        print("Robot Position (world): ", robot.position_world)
+        # print("Start (world): ", start_world)
+        print("Goal (world): ", goal_world)
 
+        print("Starting A* pathfinding...")
+        path = astar.find_path(start, goal)
+        smooth_path = astar.smooth_path(path, 80)
+        if(path is None):
+            print("No path found.")
+            exit(1)
 
-    result = visualize_path(map_data, smooth_path, start, use_gradient=False, color=(0, 0, 255), thickness=2)
-    mirror = cv2.flip(result, 1)
-    cv2.namedWindow('My Resizable Window', cv2.WINDOW_NORMAL)
-    cv2.imshow('My Resizable Window', mirror)
-    while True:
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27 or key == ord('q'):
-            break
-    cv2.destroyAllWindows()
+        result = visualize_path(map_data, smooth_path, start, use_gradient=False, color=(0, 0, 255), thickness=2)
+        mirror = cv2.flip(result, 1)
+        cv2.namedWindow('My Resizable Window', cv2.WINDOW_NORMAL)
+        cv2.imshow('My Resizable Window', mirror)
+        while True:
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27 or key == ord('q'):
+                break
+        cv2.destroyAllWindows()
 
-    """converting path points to world coordinates for robot navigation"""
-    world_path = map_data.path_to_world(smooth_path)
-    print("First point: ", world_path[0])    
+        """converting path points to world coordinates for robot navigation"""
+        world_path = map_data.path_to_world(smooth_path)
+        print("First point: ", world_path[0])    
 
-    # print("Starting robot data thread")
-    # send_data = threading.Thread(target=robot.send_wheel_speeds, args=())
-    # send_data.daemon = True
-    # send_data.start()
+        print("Starting robot data thread")
+        send_data = threading.Thread(target=robot.send_wheel_speeds, args=(stop_event,))
+        send_data.daemon = True
+        send_data.start()
 
-    robot.followpath(world_path, goal_world, navigator)
-    # print(world_path)
+        robot.followpath(world_path, goal_world, navigator)
 
-
-    shutdown()
+        # stop_event.set()
+        # send_data.join()
+        goal_reached(robot)
+        
+        # update_Position.join()
+        # print(world_path)
 
     os._exit(0)
     update_Position.join()
