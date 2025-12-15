@@ -24,6 +24,13 @@ width = 1280
 np.set_printoptions(legacy='1.25')
 
 # ---- helpers ----
+def estop():
+    key = cv2.waitKey(1)
+    if key == 27 or key == ord('q'):
+        shutdown()
+        print("E-STOP ACTIVATED")
+        os._exit(1)
+
 def rad2deg_wrapped(rad):
     """Convert radians to degrees (wrapped to [-180, 180])."""
     deg = rad * 180.0 / math.pi
@@ -506,38 +513,42 @@ class FollowTheCarrot:
         dx = carrot[0] - robot_pos[0]
         dy = carrot[1] - robot_pos[1]
 
-        # print("Robot: ", robot_pos, "Carrot:", carrot)
-
         target_heading = rad2deg_wrapped(math.atan2(dy, dx))
 
         robot_heading = rad2deg_wrapped(robot_heading)
 
         heading_error = angle_diff_deg(robot_heading, target_heading)
+        reversed_heading_error = angle_diff_deg(robot_heading + 180, target_heading)
 
-        print(heading_error)
+        # decide forward vs backward by comparing absolute heading errors
+        abs_fwd = abs(heading_error)
+        abs_rev = abs(reversed_heading_error)
 
-        # Angular velocity control (proportional)
-
-        if (heading_error < 25 and heading_error > -25 ):
-            linear_speed = (base_speed) #greater the heading error, the slower the base turns
-            angular_velocity = self.Kp * heading_error * 1.5
-            # heading_error = 0
+        if abs_rev < abs_fwd:
+            # Prefer driving backwards
+            # print("Driving backwards (reversed heading smaller)")
+            if abs_rev <= 25:
+                linear_speed = -base_speed
+                angular_velocity = self.Kp * reversed_heading_error * 1.8
+            else:
+                linear_speed = 0.0
+                angular_velocity = self.Kp * reversed_heading_error
         else:
-            # print("Just turning")
-            linear_speed = 0
-            angular_velocity = self.Kp * heading_error
+            # Drive forwards
+            # print("Driving forwards")
+            if abs_fwd <= 25:
+                linear_speed = base_speed
+                angular_velocity = self.Kp * heading_error * 1.8
+            else:
+                linear_speed = 0.0
+                angular_velocity = self.Kp * heading_error
 
-        # print(self.Kp)
-        # print(angular_velocity, linear_speed)
-        # Return control signals
         time.sleep(0.1)
         return linear_speed, angular_velocity, carrot
-    
-
 """ Class to update and store robot pose estimation"""
 class Robot:
     def __init__(self, cam, speed, tolerance, Kp, Ki, Kd):
-        self.position_world = (0,0)  # x, y in meters OF WORLD FRAME
+        self.position_world = (5,5)  # x, y in meters OF WORLD FRAME
         self.position_frame = (0,0)  # x, y in meters OF ROBOT FRAME
         self.heading = 0.0  # theta in radians
         self.prev_heading = 0.0
@@ -724,6 +735,7 @@ class Robot:
         self.dt = time.time()
         while is_near(self.position_world, goal, self.tolerance) is False:
             # print(self.position_world, goal)
+            # print("Robot Pos:", self.position_world, "Robot Heading: ", self.heading)
             lvelo, avelo, carrot = navigator.compute_control(self.position_world, self.heading, path, self.speed)
             # print(lvelo)
             self.set_wheel_speeds(lvelo, avelo)
@@ -789,7 +801,7 @@ class Robot:
             #TODO: get old code to send to the phidget
             sendToPhidget(self.ip_address, data)
             # print("Sent\nLeft: ", left, "Right: ", right)
-            time.sleep(0.15)
+            time.sleep(0.18)
 """ Helper Class for Astar"""
 class Node:
     def __init__(self, position, g_cost=float('inf'), h_cost=0):
@@ -919,7 +931,244 @@ class AStar:
             smoothed.append(tuple(smoothed_point_int))
         
         return smoothed
+"""GUI class for selecting waypoints on the map using OpenCV"""
+class MapGUI:
+    """
+    Simple OpenCV GUI for selecting waypoints by clicking on the map.
+    - Left click: add waypoint (pixel coords)
+    - Right click: remove last waypoint
+    - 's' key: stop and return waypoints (in world coords)
+    - 'q' or ESC: quit without returning waypoints (returns [])
+    The GUI also shows the robot's current location as a green circle (updated each loop).
+    """
+    def __init__(self, map_obj, robot, window_name="Map GUI", display_width=800):
+        if not hasattr(map_obj, "map"):
+            raise TypeError("map_obj must be a Map instance")
+        self.map_obj = map_obj
+        self.robot = robot
+        self.window_name = window_name
+        self.display_width = display_width
 
+        self._waypoints_px = []   # list of (x,y) pixel coords
+        self._astar_px = []       # optional A* path to display
+        self._lock = threading.Lock()
+        self._running = False
+
+        self.blue = (255, 0, 0)
+        self.purple = (255, 0, 255)
+        self.orange = (0, 165, 255)
+        self.green = (0, 255, 0)
+        self.gray = (200, 200, 200)
+        self.red = (0, 0, 255)
+
+        # prepare base image scaled for display
+        self._orig = self.map_obj.map.copy() if len(self.map_obj.map.shape) == 2 else cv2.cvtColor(self.map_obj.map, cv2.COLOR_BGR2GRAY)
+        self._scale = self.display_width / float(self._orig.shape[1])
+        self._disp_h = int(self._orig.shape[0] * self._scale)
+        self._base_disp = cv2.resize(cv2.cvtColor(self._orig, cv2.COLOR_GRAY2BGR), (self.display_width, self._disp_h), interpolation=cv2.INTER_AREA)
+
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.window_name, self.display_width, self._disp_h)
+        cv2.setMouseCallback(self.window_name, self._on_mouse)
+
+    def _px_to_disp(self, px):
+        """convert original px coords to display coords"""
+        return (int(round(px[0] * self._scale)), int(round(px[1] * self._scale)))
+
+    def _disp_to_px(self, dx, dy):
+        """convert display coords back to original image pixel coords"""
+        return (int(round(dx / self._scale)), int(round(dy / self._scale)))
+
+    def _on_mouse(self, event, x, y, flags, param):
+        # NOTE: window shows a horizontally flipped image (cv2.flip). Mouse X is relative to the flipped display.
+        # Convert flipped display x -> original display x before converting to map pixels.
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # un-mirror the x coordinate from the flipped display
+            x_unmirrored = int(round(self.display_width - 1 - x))
+            px = self._disp_to_px(x_unmirrored, y)
+            with self._lock:
+                # clamp to original image bounds
+                px = (max(0, min(self._orig.shape[1]-1, px[0])),
+                      max(0, min(self._orig.shape[0]-1, px[1])))
+                self._waypoints_px.append(px)
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            # right-click removal should also map from flipped display coordinates
+            x_unmirrored = int(round(self.display_width - 1 - x))
+            # y not used for removal, but keep behavior consistent
+            with self._lock:
+                if self._waypoints_px:
+                    self._waypoints_px.pop()
+
+    def get_waypoints_world(self):
+        """Return current waypoints as list of (xw, yw) in meters"""
+        with self._lock:
+            return [ self.map_obj.pgm_to_world(p[0], p[1]) for p in list(self._waypoints_px) ]
+
+    def get_waypoints_px(self):
+        with self._lock:
+            return list(self._waypoints_px)
+
+    def clear_waypoints(self):
+        with self._lock:
+            self._waypoints_px.clear()
+
+    def load_new_path(self, path_px):
+        """Load a new set of waypoints (list of (x,y) pixel coords)"""
+        with self._lock:
+            self._astar_px = list(path_px)
+
+    def show_progress(self, astar_path_px=None, use_gradient=False, stop_event=None, update_interval=0.1, display_title=None):
+        """
+        Display a live, non-interactive view showing:
+          - map (or gradient if available and use_gradient=True)
+          - A* path (astar_path_px) if provided (list of (x,y) pixels)
+          - current waypoints (left-click list) as orange markers/lines
+          - robot current position (green) updated from robot.position_world
+
+        This function does NOT accept user input. It runs until stop_event.is_set()
+        or until optional timeout_seconds elapses (if provided via stop_event as a threading.Event).
+        If stop_event is None it runs for 30 seconds then exits.
+
+        Args:
+            astar_path_px (list[(x,y)]): optional path in pixel coords to draw
+            use_gradient (bool): draw over map_obj.gradient_map when available
+            stop_event (threading.Event): must be set externally to stop the display loop
+            update_interval (float): seconds between display refreshes
+            display_title (str): optional window title
+        """
+        if display_title is None:
+            display_title = self.window_name + " - Progress"
+
+        # prepare base image (choose gradient or raw map)
+        if use_gradient and getattr(self.map_obj, "gradient_map", None) is not None:
+            base_img = self.map_obj.gradient_map.copy()
+        else:
+            base_img = self.map_obj.map.copy()
+
+        # convert to BGR and scale for display
+        if len(base_img.shape) == 2:
+            base_bgr = cv2.cvtColor(base_img, cv2.COLOR_GRAY2BGR)
+        else:
+            base_bgr = base_img.copy()
+        base_disp = cv2.resize(base_bgr, (self.display_width, self._disp_h), interpolation=cv2.INTER_AREA)
+
+        cv2.namedWindow(display_title, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(display_title, self.display_width, self._disp_h)
+
+        # default stop behavior if no event supplied
+        local_stop = False
+        if stop_event is None:
+            stop_event = threading.Event()
+            # run for 30 seconds by default
+            def _delayed_stop(ev, timeout):
+                time.sleep(timeout)
+                ev.set()
+            t = threading.Thread(target=_delayed_stop, args=(stop_event, 120.0), daemon=True)
+            t.start()
+
+        try:
+            while not stop_event.is_set():
+                disp = base_disp.copy()
+
+                # draw provided A* path
+                if self._astar_px:
+                    pts = [ (int(p[0]), int(p[1])) for p in self._astar_px ]
+                    # convert to display coords
+                    pts_disp = [ self._px_to_disp(p) for p in pts ]
+                    for i in range(1, len(pts_disp)):
+                        cv2.line(disp, pts_disp[i-1], pts_disp[i], (0, 0, 255), 2)
+
+                    if pts_disp:
+                        cv2.circle(disp, pts_disp[0], 3, (self.red), -1)   # path start
+                        cv2.circle(disp, pts_disp[-1], 3, self.red, -1)  # path end
+
+                # draw current waypoints (non-interactive)
+                with self._lock:
+                    way_px = list(self._waypoints_px)
+                if way_px:
+                    pts_disp = [ self._px_to_disp(p) for p in way_px ]
+                    for i in range(len(pts_disp)):
+                        cv2.circle(disp, pts_disp[i], 3, self.orange, -1)  # orange
+                        cv2.putText(disp, str(i), (pts_disp[i][0], pts_disp[i][1]-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,0,0), 1, cv2.LINE_AA)
+                # draw robot current location (if available)
+                try:
+                    rw = self.robot.position_world
+                    if rw is not None:
+                        rx, ry = self.map_obj.world_to_pgm(rw[0], rw[1])
+                        r_disp = self._px_to_disp((rx, ry))
+                        cv2.circle(disp, r_disp, 5, self.purple, -1)  # purple robot marker
+                except Exception:
+                    pass
+
+                # overlay minimal instructions (informational only)
+                mirror = cv2.flip(disp, 1)
+                cv2.putText(mirror, "Live progress. Stop by pressing \"q\" or \"esq\".", (8, 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,0,0), 1, cv2.LINE_AA)
+
+                # flip horizontally to match other GUI behavior
+                cv2.imshow(display_title, mirror)
+                # small wait — we intentionally ignore any key presses
+                key = cv2.waitKey(1)
+                if key == 27 or key == ord('q'):
+                    print("ESTOP: QUITTING")
+                    shutdown()
+                    os._exit(1)
+                    break
+
+        finally:
+            cv2.destroyWindow(display_title)
+            return
+
+    def show(self):
+        """
+        Run the GUI loop. Returns list of waypoints in world coords when user presses 's'.
+        Returns [] if user quits with 'q' or ESC.
+        """
+        self._running = True
+        result_world = []
+
+        while self._running:
+            display = self._base_disp.copy()
+
+            # draw waypoints and lines
+            with self._lock:
+                pts_px = list(self._waypoints_px)
+            if pts_px:
+                pts_disp = [ self._px_to_disp(p) for p in pts_px ]
+                for i in range(len(pts_disp)):
+                    cv2.circle(display, pts_disp[i], 3, (0,165,165), -1)  # orange
+                    cv2.putText(display, str(i), (pts_disp[i][0], pts_disp[i][1]-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,0,0), 1, cv2.LINE_AA)
+                    
+
+            # draw robot current location if available
+            try:
+                rw = self.robot.position_world
+                if rw is not None:
+                    rx, ry = self.map_obj.world_to_pgm(rw[0], rw[1])
+                    r_disp = self._px_to_disp((rx, ry))
+                    cv2.circle(display, r_disp, 3, (0,255,0), -1)  # green robot marker
+            except Exception:
+                pass
+
+            # instructions
+            mirror = cv2.flip(display, 1)
+            cv2.putText(mirror, "Left-click: add waypoint  Right-click: remove last  s: start  q/ESC: quit", (8, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,0,0), 1, cv2.LINE_AA)
+            cv2.imshow(self.window_name, mirror)
+            key = cv2.waitKey(100) & 0xFF
+            if key == ord('s'):
+                # return waypoints in world coords
+                result_world = self.get_waypoints_world()
+                break
+            if key == ord('q') or key == 27:
+                result_world = []
+                break
+
+        cv2.destroyWindow(self.window_name)
+        self._running = False
+        return result_world
 
 """Main control loop
     Step 1: Initialize and find location of robot (program)
@@ -931,24 +1180,36 @@ class AStar:
 """
 
 def main():
+    e_stop = threading.Thread(target=estop, args=())
+    e_stop.daemon = True
+    e_stop.start()
 
     # path_buffer = 50
     stop_event = threading.Event()
     atexit.register(shutdown)
-    robot = Robot(1, 1.5, .5, 0.7, 0.00015, 0.1)
+
+    robot = Robot(1, 1.5, .5, 0.6, 0.0001, 0.1)
+
     map_data = Map(map_path, map_scale_path)
-    map_data.create_gradient_around_obstacles(map_path, radius = 2)
-
-    astar = AStar(map_data)
-
-    navigator = FollowTheCarrot(1, .75)
+    map_data.create_gradient_around_obstacles(map_path, radius = 1.5)
     
+    astar = AStar(map_data)
+    navigator = FollowTheCarrot(1.5, .75)
+
     print("Starting robot pose thread...")
     update_Position = threading.Thread(target=robot.get_pose_continuous, args=())
     update_Position.daemon = True
     update_Position.start()
+    
+    print("Starting Map GUI...")
+    gui = MapGUI(map_data, robot, window_name="Select Waypoints", display_width=600)
+    goals = gui.show()
 
-    goals = [(6, 3.5), (3,3), (2,8)]
+    gui_prog = threading.Thread(target=gui.show_progress, args=())
+    gui_prog.daemon = True
+    gui_prog.start()
+
+    # goals = [(6, 3.5), (3,3), (2,8)]
 
     print(goals)
     for goal in goals:
@@ -967,6 +1228,7 @@ def main():
 
         # start_world = map_data.pgm_to_world(start[0], start[1])
         goal_world = map_data.pgm_to_world(goal[0], goal[1])
+        # print(goal)
 
         print("Robot Position (world): ", robot.position_world)
         # print("Start (world): ", start_world)
@@ -978,16 +1240,10 @@ def main():
         if(path is None):
             print("No path found.")
             exit(1)
-
-        result = visualize_path(map_data, smooth_path, start, use_gradient=False, color=(0, 0, 255), thickness=2)
-        mirror = cv2.flip(result, 1)
-        cv2.namedWindow('My Resizable Window', cv2.WINDOW_NORMAL)
-        cv2.imshow('My Resizable Window', mirror)
-        while True:
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27 or key == ord('q'):
-                break
-        cv2.destroyAllWindows()
+        else:
+            print(f"Path found with {len(path)} waypoints.")
+            
+        gui.load_new_path(smooth_path)
 
         """converting path points to world coordinates for robot navigation"""
         world_path = map_data.path_to_world(smooth_path)

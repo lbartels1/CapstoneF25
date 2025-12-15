@@ -38,7 +38,7 @@ def main(image_source=1):
     width = 1280
     
     if isinstance(image_source, int):
-        cap = cv2.VideoCapture(image_source, cv2.CAP_MSMF)
+        cap = cv2.VideoCapture(image_source)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
 

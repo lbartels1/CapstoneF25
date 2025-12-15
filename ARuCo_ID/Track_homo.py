@@ -130,7 +130,9 @@ while True:
                         yaw_world = math.atan2(Rw[1, 0], Rw[0, 0])
                         marker_info["tvec_world"] = t_world.flatten()
                         marker_info["rvec_world"] = rvec_world.flatten()
-                        marker_info["yaw_world_from_pose"] = yaw_world
+                        marker_info["yaw_world_from_pose"] = yaw
+
+                        print(yaw)
             except Exception:
                 pass
 
@@ -159,8 +161,8 @@ while True:
         ax.set_ylabel("Y (m)")
         ax.axis('equal')
         ax.grid(True)
-        ax.set_xlim((-10,10))
-        ax.set_ylim((-10,10))
+        ax.set_xlim((0,10))
+        ax.set_ylim((0,10))
 
         for m in world_markers:
             wc = m["world_corners"]

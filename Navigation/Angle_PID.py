@@ -7,6 +7,7 @@ from heapq import heappush, heappop
 import threading
 import socket
 import json
+import atexit
 
 def shutdown(HOST = "192.168.0.103"):
     PORT = 7002 # TCP port on the Phidget 
@@ -64,6 +65,11 @@ map_scale_path = r"C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Perimeter
 
 height = 720
 width = 1280
+
+def rad2deg(rad):
+    """Convert radians to degrees (wrapped to [-180, 180])."""
+    deg = rad * 180.0 / math.pi
+    return deg
 
 def sendToPhidget(HOST, data): # IP address of the Phidget on XOVER
     PORT = 7002 # TCP port on the Phidget 
@@ -199,7 +205,7 @@ class PIDController:
 
         # Compute error
         error = target_angular_velocity - measured_angular_velocity
-        print(error)
+        # print(error)
         # if (measured_angular_velocity <= 0.1+target_angular_velocity and measured_angular_velocity >= target_angular_velocity - 0.1 ):
         # PID terms
         self.integral += error * dt
@@ -332,7 +338,6 @@ class Robot:
                     # compute yaw from first edge (tl->tr)
                     edge = world_corners[1] - world_corners[0]
                     yaw = math.atan2(edge[1], edge[0])  # radians in world plane
-
                     marker_info = {
                         "id": id_val,
                         "img_corners": img_corners,
@@ -352,15 +357,23 @@ class Robot:
                                 marker_T_world = self.cam_T @ marker_T_cam
                                 t_world = marker_T_world[:3, 3]
                                 Rw = marker_T_world[:3, :3]
-                                rvec_world, _ = cv2.Rodrigues(Rw)
-                                yaw_world = math.atan2(Rw[1, 0], Rw[0, 0])
+
+# marker forward axis in world frame:
+                                robot_fwd = Rw[:, 0]                 # first column
+
+                                # heading:
+                                yaw_world = math.atan2(robot_fwd[1], robot_fwd[0])
+
+                                marker_info["yaw_world_from_pose"] = yaw_world
+
                                 marker_info["tvec_world"] = t_world.flatten()
-                                marker_info["rvec_world"] = rvec_world.flatten()
+                                # marker_info["rvec_world"] = rvec_world.flatten()
                                 marker_info["yaw_world_from_pose"] = yaw_world
 
                                 x, y = marker_info["center_world"]
                                 # Full measurement: x, y, heading
-                                self.update_ekf_with_camera(x, y, yaw_world)
+                                self.update_ekf_with_camera(x, y, yaw)
+                                print(rad2deg_wrapped(yaw))
                                 
                     except Exception:
                         pass
@@ -368,19 +381,19 @@ class Robot:
                     world_markers.append(marker_info)
 
             """ ---- OpenCV overlay ----"""
-            # vis = frame_und.copy()
-            # for m in world_markers:
-            #     pts = m["img_corners"].astype(int)
-            #     cv2.polylines(vis, [pts.reshape(-1,1,2)], isClosed=True, color=(0,255,0), thickness=2)
-            #     img_center = cv2.perspectiveTransform(np.array([[m["center_world"]]], dtype=np.float32), self.Hw)[0,0]
-            #     cv2.circle(vis, (int(img_center[0]), int(img_center[1])), 4, (0,0,255), -1)
-            #     cv2.putText(vis, f"id:{m['id']}", (int(img_center[0])+5, int(img_center[1])-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
-            #     tip_world = m["center_world"] + np.array([math.cos(m["yaw"]), math.sin(m["yaw"])]) * (self.marker_length * 0.75)
-            #     tip_img = cv2.perspectiveTransform(np.array([[tip_world]], dtype=np.float32), self.Hw)[0,0]
-            #     cv2.arrowedLine(vis, (int(img_center[0]), int(img_center[1])), (int(tip_img[0]), int(tip_img[1])), (0,0,255), 2, tipLength=0.2)
+            vis = frame_und.copy()
+            for m in world_markers:
+                pts = m["img_corners"].astype(int)
+                cv2.polylines(vis, [pts.reshape(-1,1,2)], isClosed=True, color=(0,255,0), thickness=2)
+                img_center = cv2.perspectiveTransform(np.array([[m["center_world"]]], dtype=np.float32), self.Hw)[0,0]
+                cv2.circle(vis, (int(img_center[0]), int(img_center[1])), 4, (0,0,255), -1)
+                cv2.putText(vis, f"id:{m['id']}", (int(img_center[0])+5, int(img_center[1])-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
+                tip_world = m["center_world"] + np.array([math.cos(m["yaw"]), math.sin(m["yaw"])]) * (self.marker_length * 0.75)
+                tip_img = cv2.perspectiveTransform(np.array([[tip_world]], dtype=np.float32), self.Hw)[0,0]
+                cv2.arrowedLine(vis, (int(img_center[0]), int(img_center[1])), (int(tip_img[0]), int(tip_img[1])), (0,0,255), 2, tipLength=0.2)
 
             """show frame"""
-            # cv2.imshow("ArUco realtime (undistorted)", vis)
+            cv2.imshow("ArUco realtime (undistorted)", vis)
             key = cv2.waitKey(1)
             if key == 27 or key == ord('q'):
                 break
@@ -452,12 +465,14 @@ class Robot:
 
             #TODO: get old code to send to the phidget
             sendToPhidget(self.ip_address, data)
-            print("Sent\nLeft: ", left, "Right: ", right)
+            # print("Sent\nLeft: ", left, "Right: ", right)
             time.sleep(0.06)
             
 
 # pid = PIDController(1, 0.25, 0.1)
 robot = Robot(1)
+
+atexit.register(shutdown)
 
 print("Starting robot pose thread...")
 update_Position = threading.Thread(target=robot.get_pose_continuous, args=())
@@ -474,6 +489,6 @@ for i in range(1000):
     key = cv2.waitKey(1)
     if key == 27 or key == ord('q'):
         break
-    robot.set_wheel_speeds(lvelo, -20)
+    robot.set_wheel_speeds(lvelo, -5)
     # robot.send_wheel_speeds()
     time.sleep(0.06)

@@ -8,8 +8,8 @@ camera_matrix = np.loadtxt(r'C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25
 dist_coeffs = np.loadtxt(r'C:\Users\larsc\Documents\CAPSTONE\repos\CapstoneF25\Calibration_Data\camera_dist.txt', delimiter=',')
 
 # Define blue color range in HSV
-LOWER_BLUE = np.array([80, 45, 65])
-UPPER_BLUE = np.array([119, 188, 255])
+LOWER_BLUE = np.array([83, 0, 83])
+UPPER_BLUE = np.array([149, 255, 255])
 
 height = 720
 width = 1280
@@ -217,6 +217,27 @@ def main_single_image(image_source=r"C:\Users\larsc\Documents\CAPSTONE\repos\Cap
         if key not in uniq or uniq[key][2] < L:
             uniq[key] = (a, b, L)
     segments_final = list(uniq.values())
+
+    # --- add fake blue-tape along camera border (project image corners to world and add segments) ---
+    try:
+        img_h, img_w = frame.shape[:2]
+        img_corners = np.array([[0, 0],
+                                [img_w - 1, 0],
+                                [img_w - 1, img_h - 1],
+                                [0, img_h - 1]], dtype=np.float32)
+        # H maps image -> world (computed earlier)
+        world_corners = cv2.perspectiveTransform(np.array([img_corners]), H)[0]  # shape (4,2)
+        border_segments = []
+        for i in range(len(world_corners)):
+            p1 = world_corners[i]
+            p2 = world_corners[(i + 1) % len(world_corners)]
+            length = float(np.linalg.norm(p2 - p1))
+            border_segments.append(((float(p1[0]), float(p1[1])), (float(p2[0]), float(p2[1])), length))
+        # append border segments so they are written into the PGM
+        segments_final.extend(border_segments)
+    except Exception as e:
+        print("Warning: failed to add camera-border segments:", e)
+    # -----------------------------------------------------------------------------
 
     if not segments_final:
         print("No tape segments found in the single image.")
